@@ -11,5 +11,5 @@
 - Avoid side effects: no new external network calls, no secret handling, and no unexpected global-state mutations.
 
 ## Execution approach
-- Prefer small, verifiable changes.
+- Prefer small, verifiable steps.
 - If scope is large, propose a clear, step-by-step plan first.
