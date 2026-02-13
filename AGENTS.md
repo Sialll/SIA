@@ -1,8 +1,8 @@
 # Codex AGENTS Instructions
 
 ## Workflow
-- Work only via Issue -> PR process.
-- Each PR should change or create exactly one file.
+- Work only via Issue -> Branch -> PR.
+- Default: one PR changes/creates one file.
 - If an issue requires multiple files, document the reason explicitly and split work intentionally.
 
 ## Constraints
