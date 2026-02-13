@@ -1,0 +1,70 @@
+﻿name: Task
+description: 1개 작업 단위(기본 1파일)로 Codex가 구현할 티켓
+title: "[TASK] "
+labels: ["task"]
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: Work type
+      options:
+        - New file
+        - Edit existing file
+        - Bug fix
+        - Doc update
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: 무엇을 만들거나 바꿔야 하는지, 기대 결과를 명확히
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: 입력/출력/규칙을 불릿으로 명시
+      placeholder: |
+        - 입력: ...
+        - 출력: ...
+        - 하드 블록 규칙: ...
+        - 정책: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints (must obey)
+      value: |
+        - 기본: PR 1개 = 파일 1개 변경/생성
+        - 리팩터링 금지(명시된 경우만 허용)
+        - core.analysis 변경 금지(명시된 경우만 허용)
+        - 사이드 이펙트 금지
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: exceptions
+    attributes:
+      label: Exceptions (only if needed)
+      options:
+        - label: 이 작업은 파일 2개 이상 변경이 필요하다(이유를 Requirements에 명시)
+        - label: 이 작업은 리팩터링을 포함한다(범위를 Requirements에 명시)
+        - label: 이 작업은 core.analysis 변경이 필요하다(변경 범위를 Requirements에 명시)
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 완료 판정 기준(DoD)
+      placeholder: |
+        - [ ] CI 통과
+        - [ ] 금지사항 위반 없음
+        - [ ] 입력/출력/에러 처리 명확
+    validations:
+      required: true
