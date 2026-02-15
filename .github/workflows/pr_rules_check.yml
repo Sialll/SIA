@@ -5,6 +5,7 @@ on:
 
 jobs:
   pr_rules:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'exception:multi-file') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
