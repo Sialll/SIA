@@ -2,11 +2,10 @@ name: PR Rules Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
 
 jobs:
   pr_rules:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'exception:multi-file') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -19,6 +18,24 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Require exception reason for multi-file PRs
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'exception:multi-file') }}
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          BODY="${PR_BODY:-}"
+          if printf '%s' "$BODY" | grep -qiE '(Exception reason:|예외 사유:)'; then
+            echo "✅ Exception reason found."
+          else
+            echo "❌ Missing exception reason."
+            echo "Please add ONE of the following lines to the PR description:"
+            echo "- Exception reason: <text>"
+            echo "- 예외 사유: <text>"
+            exit 1
+          fi
+
       - name: Compute changed files
         id: changed
         shell: bash
@@ -30,6 +47,7 @@ jobs:
           echo "Changed files: $FILES"
 
       - name: Run SIA PR checks
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'exception:multi-file') }}
         shell: bash
         run: |
           set -euo pipefail
