@@ -1,4 +1,4 @@
-﻿name: PR Rules Check
+name: PR Rules Check
 
 on:
   pull_request:
