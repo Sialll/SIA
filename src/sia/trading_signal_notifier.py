@@ -174,6 +174,26 @@ def _http_post_json(url: str, payload: dict[str, Any], timeout: int = 20) -> dic
     return _json_request(url, payload=payload, method="POST", timeout=timeout)
 
 
+def _has_finnhub_access_denied_error(payload: dict[str, Any]) -> bool:
+    raw = str(payload.get("error", ""))
+    lowered = raw.lower()
+    return "access to this resource" in lowered or "you don't have access" in lowered
+
+
+def _fetch_finnhub_last_close(ticker: str, api_key: str) -> list[PricePoint]:
+    url = "https://finnhub.io/api/v1/quote"
+    payload = {"symbol": ticker, "token": api_key}
+    data = _http_get_json(url, payload)
+
+    if "error" in data and str(data["error"]).strip():
+        raise RuntimeError(f"Finnhub quote failed: {data}")
+    if not data or data.get("c") is None:
+        raise RuntimeError(f"Finnhub quote response missing close: {data}")
+
+    close = float(data["c"])
+    return [PricePoint(int(time.time()), close)]
+
+
 def load_settings(argv: list[str] | None = None) -> Settings:
     parser = argparse.ArgumentParser(prog="trading_signal_notifier")
     parser.add_argument("--tickers", default=_env("TICKERS", ""))
@@ -412,6 +432,10 @@ def _fetch_finnhub_closes(ticker: str, api_key: str, *, count: int = 40) -> list
 
     data = _http_get_json(url, payload)
     if data.get("s") != "ok":
+        if _has_finnhub_access_denied_error(data):
+            raise RuntimeError("FINNHUB_CANDLE_ACCESS_DENIED")
+        if "error" in data and str(data.get("error")).strip():
+            raise RuntimeError(f"Finnhub candle failed: {data.get('error')}")
         raise RuntimeError(f"Finnhub candle failed: {data}")
 
     closes = data.get("c", [])
@@ -831,18 +855,28 @@ def run_once(settings: Settings) -> None:
     with sqlite3.connect(settings.db_path) as conn:
         for ticker in settings.tickers:
             try:
+                close_source = "mock" if settings.dry_run else "finnhub"
                 if settings.dry_run:
                     closes_points = _mock_prices(ticker, 40)
                 elif not settings.finnhub_api_key:
                     raise RuntimeError("FINNHUB_API_KEY is required for price fetch")
                 else:
-                    closes_points = _fetch_finnhub_closes(ticker, settings.finnhub_api_key)
+                    try:
+                        closes_points = _fetch_finnhub_closes(ticker, settings.finnhub_api_key)
+                        close_source = "finnhub-candle"
+                    except RuntimeError as exc:
+                        if str(exc) == "FINNHUB_CANDLE_ACCESS_DENIED":
+                            logger.warning("finnhub candle access denied for %s; fallback to quote", ticker)
+                            closes_points = _fetch_finnhub_last_close(ticker, settings.finnhub_api_key)
+                            close_source = "finnhub-quote-fallback"
+                        else:
+                            raise
 
                 _remember_prices(
                     conn,
                     ticker,
                     closes_points,
-                    source="mock" if settings.dry_run else "finnhub",
+                    source=close_source,
                 )
                 if not closes_points:
                     logger.warning("no price data for %s", ticker)

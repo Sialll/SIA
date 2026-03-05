@@ -46,11 +46,11 @@ fi
 cd "$REPO_DIR"
 TO_TS=$(date +%s)
 FROM_TS=$((TO_TS - 86400))
-API_URL="https://finnhub.io/api/v1/stock/candle"
-URL="${API_URL}?symbol=AAPL&resolution=D&from=${FROM_TS}&to=${TO_TS}&token=${FINNHUB_API_KEY}"
+QUOTE_URL="https://finnhub.io/api/v1/quote?symbol=AAPL&token=${FINNHUB_API_KEY}"
+CANDLE_URL="https://finnhub.io/api/v1/stock/candle?symbol=AAPL&resolution=D&from=${FROM_TS}&to=${TO_TS}&token=${FINNHUB_API_KEY}"
 
 RESP_FILE="$(mktemp)"
-if ! HTTP_CODE=$(curl -sS --max-time "$CHECK_TIMEOUT" -w "%{http_code}" -o "$RESP_FILE" "$URL"); then
+if ! HTTP_CODE=$(curl -sS --max-time "$CHECK_TIMEOUT" -w "%{http_code}" -o "$RESP_FILE" "$QUOTE_URL"); then
   echo "failed to request finnhub endpoint"
   rm -f "$RESP_FILE"
   exit 3
@@ -76,8 +76,8 @@ except Exception as exc:
     print(f"invalid json response: {exc}")
     sys.exit(2)
 
-if data.get('s') == 'ok' and data.get('c'):
-    print('FINNHUB_API_KEY valid')
+if data.get("c"):
+    print("FINNHUB_API_KEY valid")
     sys.exit(0)
 
 if 'error' in data and data['error']:
@@ -93,4 +93,51 @@ if [[ $PY_STATUS -ne 0 ]]; then
   exit $PY_STATUS
 fi
 
-echo "FINNHUB check done."
+if ! HTTP_CODE=$(curl -sS --max-time "$CHECK_TIMEOUT" -w "%{http_code}" -o "$RESP_FILE" "$CANDLE_URL"); then
+  echo "failed to request finnhub candle endpoint"
+  rm -f "$RESP_FILE"
+  exit 3
+fi
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+  python3 - "$RESP_FILE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    raw = f.read()
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"candle response parse failed: {exc}")
+    sys.exit(2)
+
+if data.get("s") == "ok" and data.get("c"):
+    print("finnhub candle endpoint ok")
+    sys.exit(0)
+
+if "error" in data and data["error"] and "access to this resource" in str(data["error"]).lower():
+    print("candle access blocked: free plan can pass quote auth but cannot access stock/candle")
+    print("run without chart signals or upgrade Finnhub plan.")
+    sys.exit(0)
+
+print(f"unexpected candle response: {raw[:300]}")
+sys.exit(0)
+PY
+  PY_STATUS=$?
+  rm -f "$RESP_FILE"
+  if [[ $PY_STATUS -ne 0 ]]; then
+    exit $PY_STATUS
+  fi
+elif [[ "$HTTP_CODE" == "403" ]]; then
+  echo "finnhub candle endpoint blocked (403). quote endpoint is valid."
+  echo "run without chart signals or upgrade Finnhub plan."
+else
+  echo "finnhub candle http failed: $HTTP_CODE"
+  cat "$RESP_FILE" 2>/dev/null || true
+  rm -f "$RESP_FILE"
+  exit 3
+fi
+
+rm -f "$RESP_FILE"
+echo "FINNHUB preflight done."

@@ -48,6 +48,7 @@ SIA_POLL_MINUTES=30 ./scripts/sia-notifier-launchd.command install conservative
   - `__YOUR_*`, `dummy`, `placeholder` 형태의 가짜값은 실행이 차단됩니다.
 - Finnhub 키 선검증
   - `./scripts/sia-notifier-check-finnhub.command`
+  - `403` 반환은 키 자체는 맞아도 `stock/candle` 권한이 없는 경우가 많음(차트 신호는 fallback 동작).
 - 더블클릭 모드 체크
   - `SIA_DRY_RUN=1 TICKERS=AAPL,MSFT SIGNAL_DB_PATH=/tmp/sia_notifier.sqlite ./scripts/sia-notifier-launch.command balanced`
 - 검증 전용 실행(권장): `./scripts/sia-notifier-live-quickcheck.command balanced`
