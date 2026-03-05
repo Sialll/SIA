@@ -46,6 +46,8 @@ SIA_POLL_MINUTES=30 ./scripts/sia-notifier-launchd.command install conservative
 - 값 입력 확인
   - `TICKERS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `FINNHUB_API_KEY` 설정 확인
   - `__YOUR_*`, `dummy`, `placeholder` 형태의 가짜값은 실행이 차단됩니다.
+- Finnhub 키 선검증
+  - `./scripts/sia-notifier-check-finnhub.command`
 - 더블클릭 모드 체크
   - `SIA_DRY_RUN=1 TICKERS=AAPL,MSFT SIGNAL_DB_PATH=/tmp/sia_notifier.sqlite ./scripts/sia-notifier-launch.command balanced`
 - 검증 전용 실행(권장): `./scripts/sia-notifier-live-quickcheck.command balanced`
@@ -54,6 +56,8 @@ SIA_POLL_MINUTES=30 ./scripts/sia-notifier-launchd.command install conservative
 - 동작 확인
   - `cat ~/Library/Caches/sia-notifier/last-run.html`
   - `tail -n 40 ~/Library/Caches/sia-notifier/run.log`
+- 실전 전환 전
+  - `./scripts/sia-notifier-check-finnhub.command`
 - 주기 변경(원하면)
   - `SIA_POLL_MINUTES=30 ./scripts/sia-notifier-launchd.command install conservative`
 
