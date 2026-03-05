@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sqlite3
 import time
 import urllib.error
@@ -34,6 +35,7 @@ class Settings:
     poll_interval_minutes: int
     cooldown_minutes: int
     max_news_per_ticker: int
+    dry_run: bool
     run_once: bool
 
 
@@ -117,6 +119,7 @@ def load_settings(argv: list[str] | None = None) -> Settings:
     parser.add_argument("--poll-interval-minutes", type=int, default=int(_env("POLL_INTERVAL_MINUTES", "15")))
     parser.add_argument("--cooldown-minutes", type=int, default=int(_env("SIGNAL_COOLDOWN_MINUTES", "30")))
     parser.add_argument("--max-news-per-ticker", type=int, default=int(_env("MAX_NEWS_PER_TICKER", "3")))
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--once", action="store_true")
 
     args = parser.parse_args(argv)
@@ -138,6 +141,7 @@ def load_settings(argv: list[str] | None = None) -> Settings:
         poll_interval_minutes=args.poll_interval_minutes,
         cooldown_minutes=args.cooldown_minutes,
         max_news_per_ticker=args.max_news_per_ticker,
+        dry_run=args.dry_run,
         run_once=args.once,
     )
 
@@ -399,6 +403,80 @@ def _extract_keywords(value: Any) -> list[str]:
     return []
 
 
+def _build_deterministic_rng(seed_text: str) -> random.Random:
+    digest = hashlib.sha256(seed_text.encode("utf-8")).hexdigest()
+    seed = int(digest[:16], 16)
+    return random.Random(seed)
+
+
+def _mock_prices(ticker: str, count: int = 40) -> list[PricePoint]:
+    if count <= 0:
+        return []
+
+    rng = _build_deterministic_rng(f"{ticker}:mock-prices")
+    now = int(time.time())
+    start = now - (count * 24 * 3600)
+    base = 100.0 + (rng.random() * 40.0)
+    points: list[PricePoint] = []
+    close = base
+
+    for i in range(count):
+        start_ts = start + (i + 1) * 24 * 3600
+        drift = (rng.random() - 0.5) * 4.0
+        close = max(10.0, close + drift)
+        points.append(PricePoint(start_ts, round(close, 2)))
+
+    return points
+
+
+def _mock_news(ticker: str, limit: int) -> list[NewsItem]:
+    templates = [
+        {
+            "title": f"{ticker} 시장 기대치 상회 실적 예상",
+            "published": int(time.time()) - 4200,
+            "url": "https://example.local/news/earnings",
+            "summary": f"{ticker} 실적 개선과 수급 안정성으로 단기 매수 모멘텀 가능성",
+            "impact": "up",
+            "score": 0.46,
+            "keywords": ["실적", "수요", "확장"],
+        },
+        {
+            "title": f"{ticker} 규제 뉴스로 실적 전망 압박 논란",
+            "published": int(time.time()) - 2800,
+            "url": "https://example.local/news/regulation",
+            "summary": f"{ticker} 규제 이슈로 밸류에이션 부담이 커질 수 있는 구간",
+            "impact": "down",
+            "score": -0.41,
+            "keywords": ["규제", "심사", "영향"],
+        },
+        {
+            "title": f"{ticker} 업종 지표 강세, 거래량 증가 신호 관찰",
+            "published": int(time.time()) - 1300,
+            "url": "https://example.local/news/sector",
+            "summary": f"{ticker} 업종 수요가 증가하며 추세 반등 가능성이 제시됨",
+            "impact": "up",
+            "score": 0.33,
+            "keywords": ["거래량", "업종", "회복"],
+        },
+    ]
+
+    output: list[NewsItem] = []
+    for idx in range(min(limit, len(templates))):
+        item = templates[idx]
+        output.append(
+            NewsItem(
+                title=item["title"],
+                published=item["published"],
+                url=f"{item['url']}?ticker={ticker}&n={idx}",
+                summary=item["summary"],
+                impact=item["impact"],
+                score=float(item["score"]),
+                keywords=list(item["keywords"]),
+            )
+        )
+    return output
+
+
 def _is_cooldown_active(conn: sqlite3.Connection, ticker: str, cooldown_minutes: int) -> bool:
     window = int((datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)).timestamp())
     row = conn.execute(
@@ -413,10 +491,10 @@ def _is_cooldown_active(conn: sqlite3.Connection, ticker: str, cooldown_minutes:
     return row is not None
 
 
-def _remember_prices(conn: sqlite3.Connection, ticker: str, points: list[PricePoint]) -> None:
+def _remember_prices(conn: sqlite3.Connection, ticker: str, points: list[PricePoint], source: str = "finnhub") -> None:
     conn.executemany(
         "INSERT OR IGNORE INTO price_ticks (ticker, ts, source, close) VALUES (?, ?, ?, ?)",
-        [(ticker, p.ts, "finnhub", p.close) for p in points],
+        [(ticker, p.ts, source, p.close) for p in points],
     )
 
 
@@ -476,20 +554,38 @@ def run_once(settings: Settings) -> None:
     with sqlite3.connect(settings.db_path) as conn:
         for ticker in settings.tickers:
             try:
-                if not settings.finnhub_api_key:
+                if settings.dry_run:
+                    closes_points = _mock_prices(ticker, 40)
+                elif not settings.finnhub_api_key:
                     raise RuntimeError("FINNHUB_API_KEY is required for price fetch")
+                else:
+                    closes_points = _fetch_finnhub_closes(ticker, settings.finnhub_api_key)
 
-                closes_points = _fetch_finnhub_closes(ticker, settings.finnhub_api_key)
+                _remember_prices(
+                    conn,
+                    ticker,
+                    closes_points,
+                    source="mock" if settings.dry_run else "finnhub",
+                )
                 if not closes_points:
                     logger.warning("no price data for %s", ticker)
                     continue
-                _remember_prices(conn, ticker, closes_points)
 
                 closes = [p.close for p in closes_points]
                 logger.info("fetched price points for %s: %d", ticker, len(closes_points))
 
                 latest_news: list[NewsItem] = []
-                if settings.marketaux_api_key:
+                if settings.dry_run:
+                    raw_news = _mock_news(ticker, settings.max_news_per_ticker)
+                    for item in raw_news:
+                        _remember_news(
+                            conn,
+                            ticker,
+                            item,
+                            source_url=item.url,
+                        )
+                        latest_news.append(item)
+                elif settings.marketaux_api_key:
                     raw_news = _fetch_marketaux_news(
                         ticker,
                         settings.marketaux_api_key,
