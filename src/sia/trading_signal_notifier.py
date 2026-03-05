@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import html
 import contextlib
 import hashlib
 import json
+import math
 import logging
 import os
 import random
 import sqlite3
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -15,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
@@ -35,6 +38,12 @@ class Settings:
     poll_interval_minutes: int
     cooldown_minutes: int
     max_news_per_ticker: int
+    news_lookback_hours: int
+    telegram_parse_mode: str
+    trend_weight: float
+    rsi_weight: float
+    news_weight: float
+    signal_threshold: float
     dry_run: bool
     run_once: bool
 
@@ -75,35 +84,94 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value.strip()
 
 
-def _json_request(url: str, *, payload: dict[str, str] | None = None, timeout: int = 20) -> dict[str, Any]:
-    if payload is not None:
-        data = urllib.parse.urlencode(payload).encode("utf-8")
-    else:
-        data = None
-    req = urllib.request.Request(url, data=data, method="GET" if data is None else "POST")
+def _parse_int(value: str, name: str, min_value: int = 1, max_value: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid integer for {name}: {value}") from exc
+    if parsed < min_value:
+        raise ValueError(f"{name} must be >= {min_value}")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"{name} must be <= {max_value}")
+    return parsed
 
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        body = response.read().decode("utf-8")
-    return json.loads(body)
+
+def _parse_float(value: str, name: str, min_value: float = 0.0, max_value: float | None = None) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid number for {name}: {value}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{name} must be finite")
+    if parsed < min_value:
+        raise ValueError(f"{name} must be >= {min_value}")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"{name} must be <= {max_value}")
+    return parsed
+
+
+def _dedupe_preserve_order(values: list[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(v for v in values if v))
+
+
+def _json_request(
+    url: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    method: str = "GET",
+    timeout: int = 20,
+    max_retries: int = 2,
+    backoff_seconds: float = 0.5,
+) -> dict[str, Any]:
+    method = method.upper()
+    if method == "GET":
+        headers = {}
+        if payload is not None:
+            delimiter = "&" if "?" in url else "?"
+            url = f"{url}{delimiter}{urllib.parse.urlencode(payload)}"
+        data = None
+    elif method == "POST":
+        headers = {"Content-Type": "application/json"}
+        data = json.dumps(payload or {}).encode("utf-8")
+    else:
+        raise ValueError(f"unsupported HTTP method: {method}")
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                body = response.read().decode("utf-8", errors="ignore")
+            if not body.strip():
+                return {}
+            return json.loads(body)
+        except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, TimeoutError, json.JSONDecodeError) as exc:
+            if attempt >= max_retries:
+                raise RuntimeError(f"{method} request failed: {url}") from exc
+            logger.warning(
+                "http request retry (%d/%d) for %s: %s",
+                attempt + 1,
+                max_retries,
+                url,
+                exc,
+            )
+            time.sleep(backoff_seconds * (2**attempt))
+    return {}
 
 
 def _http_get_json(url: str, params: dict[str, str] | None = None, timeout: int = 20) -> dict[str, Any]:
     if params:
-        delimiter = "&" if "?" in url else "?"
-        url = f"{url}{delimiter}{urllib.parse.urlencode(params)}"
-    return _json_request(url, payload=None, timeout=timeout)
+        return _json_request(url, payload=params, method="GET", timeout=timeout)
+    return _json_request(url, method="GET", timeout=timeout)
 
 
 def _http_post_json(url: str, payload: dict[str, Any], timeout: int = 20) -> dict[str, Any]:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        body = response.read().decode("utf-8")
-    return json.loads(body)
+    return _json_request(url, payload=payload, method="POST", timeout=timeout)
 
 
 def load_settings(argv: list[str] | None = None) -> Settings:
@@ -119,6 +187,12 @@ def load_settings(argv: list[str] | None = None) -> Settings:
     parser.add_argument("--poll-interval-minutes", type=int, default=int(_env("POLL_INTERVAL_MINUTES", "15")))
     parser.add_argument("--cooldown-minutes", type=int, default=int(_env("SIGNAL_COOLDOWN_MINUTES", "30")))
     parser.add_argument("--max-news-per-ticker", type=int, default=int(_env("MAX_NEWS_PER_TICKER", "3")))
+    parser.add_argument("--news-lookback-hours", type=int, default=int(_env("NEWS_LOOKBACK_HOURS", "24")))
+    parser.add_argument("--telegram-parse-mode", default=_env("TELEGRAM_PARSE_MODE", "HTML"))
+    parser.add_argument("--trend-weight", type=float, default=float(_env("SIGNAL_TREND_WEIGHT", "0.55")))
+    parser.add_argument("--rsi-weight", type=float, default=float(_env("SIGNAL_RSI_WEIGHT", "0.25")))
+    parser.add_argument("--news-weight", type=float, default=float(_env("SIGNAL_NEWS_WEIGHT", "0.20")))
+    parser.add_argument("--signal-threshold", type=float, default=float(_env("SIGNAL_THRESHOLD", "0.35")))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--once", action="store_true")
 
@@ -126,11 +200,33 @@ def load_settings(argv: list[str] | None = None) -> Settings:
     if not args.tickers:
         raise ValueError("TICKERS env or --tickers is required")
 
-    normalized = tuple(
-        [ticker.strip().upper() for ticker in args.tickers.split(",") if ticker.strip()]
-    )
+    raw_tickers = [ticker.strip().upper() for ticker in args.tickers.split(",") if ticker.strip()]
+    if not raw_tickers:
+        raise ValueError("TICKERS contains no valid symbol")
+    normalized = _dedupe_preserve_order(raw_tickers)
+    if len(normalized) > 30:
+        raise ValueError("TICKERS has too many entries. maximum is 30 per run")
+
+    poll_interval_minutes = _parse_int(str(args.poll_interval_minutes), "poll-interval-minutes", 1, 24 * 60)
+    cooldown_minutes = _parse_int(str(args.cooldown_minutes), "cooldown-minutes", 1, 24 * 60)
+    max_news_per_ticker = _parse_int(str(args.max_news_per_ticker), "max-news-per-ticker", 0, 20)
+    news_lookback_hours = _parse_int(str(args.news_lookback_hours), "news-lookback-hours", 1, 24 * 14)
+    trend_weight = _parse_float(str(args.trend_weight), "trend-weight", 0.0)
+    rsi_weight = _parse_float(str(args.rsi_weight), "rsi-weight", 0.0)
+    news_weight = _parse_float(str(args.news_weight), "news-weight", 0.0)
+    signal_threshold = _parse_float(str(args.signal_threshold), "signal-threshold", 0.0, 1.0)
+    telegram_parse_mode = (args.telegram_parse_mode or "HTML").strip().upper()
+    if telegram_parse_mode not in {"HTML", "MARKDOWN", "MARKDOWNV2", "NONE"}:
+        raise ValueError("telegram-parse-mode must be HTML, MARKDOWN, MARKDOWNV2, or NONE")
+
+    total_weight = trend_weight + rsi_weight + news_weight
+    if total_weight <= 0.0:
+        raise ValueError("trend-weight + rsi-weight + news-weight must be > 0")
+    trend_weight = trend_weight / total_weight
+    rsi_weight = rsi_weight / total_weight
+    news_weight = news_weight / total_weight
     return Settings(
-        db_path=args.db_path,
+        db_path=os.path.expanduser(os.path.expandvars(args.db_path)),
         tickers=normalized,
         telegram_bot_token=args.telegram_bot_token,
         telegram_chat_id=args.telegram_chat_id,
@@ -138,9 +234,15 @@ def load_settings(argv: list[str] | None = None) -> Settings:
         marketaux_api_key=args.marketaux_api_key,
         ollama_host=args.ollama_host.rstrip("/"),
         ollama_model=args.ollama_model,
-        poll_interval_minutes=args.poll_interval_minutes,
-        cooldown_minutes=args.cooldown_minutes,
-        max_news_per_ticker=args.max_news_per_ticker,
+        poll_interval_minutes=poll_interval_minutes,
+        cooldown_minutes=cooldown_minutes,
+        max_news_per_ticker=max_news_per_ticker,
+        news_lookback_hours=news_lookback_hours,
+        telegram_parse_mode=telegram_parse_mode,
+        trend_weight=trend_weight,
+        rsi_weight=rsi_weight,
+        news_weight=news_weight,
+        signal_threshold=min(1.0, max(0.0, signal_threshold)),
         dry_run=args.dry_run,
         run_once=args.once,
     )
@@ -215,7 +317,16 @@ def _rsi(values: list[float], period: int = 14) -> float | None:
     return 100.0 - (100.0 / (1 + rs))
 
 
-def build_signal(ticker: str, closes: list[float], latest_news: list[NewsItem]) -> Signal | None:
+def build_signal(
+    ticker: str,
+    closes: list[float],
+    latest_news: list[NewsItem],
+    *,
+    trend_weight: float,
+    rsi_weight: float,
+    news_weight: float,
+    signal_threshold: float,
+) -> Signal | None:
     if len(closes) < 2:
         return None
 
@@ -245,24 +356,28 @@ def build_signal(ticker: str, closes: list[float], latest_news: list[NewsItem]) 
     news_score = sum(news_scores) / len(news_scores) if news_scores else 0.0
     news_score = max(-1.0, min(1.0, news_score))
 
-    score = trend_score * 0.55 + rsi_score * 0.25 + news_score * 0.2
+    score = trend_score * trend_weight + rsi_score * rsi_weight + news_score * news_weight
+    score = max(-1.0, min(1.0, score))
     confidence = min(1.0, max(0.0, abs(score)))
 
-    if score >= 0.35:
+    if score >= signal_threshold:
         label = "BUY"
-    elif score <= -0.35:
+    elif score <= -signal_threshold:
         label = "SELL"
     else:
         label = "HOLD"
 
     top_news = [
-        f"{n.impact}:{n.title} ({n.score:+.2f})" for n in latest_news[:2]
+        f"{n.impact}:{n.title[:40]} ({n.score:+.2f})" for n in latest_news[:2]
     ]
     if not top_news:
         top_news = ["no_news_signal"]
 
+    def _fmt_signal_value(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.2f}"
+
     reason = (
-        f"price={price:.2f}, SMA5={sma_fast}, SMA20={sma_slow}, RSI14={rsi}, "
+        f"price={price:.2f}, SMA5={_fmt_signal_value(sma_fast)}, SMA20={_fmt_signal_value(sma_slow)}, RSI14={_fmt_signal_value(rsi)}, "
         f"news={', '.join(top_news)}"
     )
 
@@ -313,16 +428,46 @@ def _fetch_finnhub_closes(ticker: str, api_key: str, *, count: int = 40) -> list
     return points[-count:]
 
 
-def _fetch_marketaux_news(ticker: str, api_key: str, limit: int = 5) -> list[dict[str, Any]]:
+def _fetch_marketaux_news(
+    ticker: str,
+    api_key: str,
+    limit: int = 5,
+    *,
+    lookback_hours: int = 24,
+) -> list[dict[str, Any]]:
+    if not api_key:
+        return []
+    if limit <= 0 or lookback_hours <= 0:
+        return []
+
     url = "https://api.marketaux.com/v1/news/all"
     payload = {
         "symbols": ticker,
-        "limit": str(limit),
+        "limit": str(limit * 2),
         "language": "en",
         "api_token": api_key,
     }
     data = _http_get_json(url, payload)
-    articles = data.get("data", []) or []
+    raw_articles = data.get("data", []) or []
+    if not isinstance(raw_articles, list):
+        return []
+
+    cutoff = int(time.time() - max(1, lookback_hours) * 3600)
+    articles: list[dict[str, Any]] = []
+    for article in raw_articles:
+        if not isinstance(article, dict):
+            continue
+        title = str(article.get("title") or "").strip()
+        if not title:
+            continue
+        published = _parse_news_published(article.get("published_at") or article.get("published"))
+        if published is None:
+            continue
+        if published < cutoff:
+            continue
+        article["published_at"] = published
+        articles.append(article)
+
     return articles[:limit]
 
 
@@ -334,37 +479,35 @@ def _llm_infer_news_summary(
     url: str,
     body: str,
 ) -> NewsItem:
+    if not body:
+        body = title
     prompt = (
-        "다음 뉴스를 한국어로 간결히 정리해서 JSON 한 개만 반환하세요."
-        "형식은 {\\"summary\\":.., \\"impact\\": \\\"up/down/neutral\\\", "
-        "\\"score\\": -1.0~1.0, \\"keywords\\":[...]} 이어야 합니다.\n"
+        "다음 뉴스를 한국어로 간결히 정리해서 JSON 한 개만 반환하세요.\n"
+        '형식은 {"summary": "...", "impact": "up/down/neutral", '
+        '"score": -1.0~1.0, "keywords": ["..."]} 이어야 합니다.\n'
         f"티커: {ticker}\n"
         f"제목: {title}\n"
         f"링크: {url}\n"
         f"본문: {body[:1200]}\n"
     )
-    response = _http_post_json(
-        f"{ollama_host}/api/generate",
-        {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.2},
-        },
-    )
-
-    raw = response.get("response", "")
-    parsed = _safe_json_from_text(raw)
-    if not parsed:
-        return NewsItem(
-            title=title,
-            published=int(time.time()),
-            url=url,
-            summary=raw[:300],
-            impact="neutral",
-            score=0.0,
-            keywords=[],
+    try:
+        response = _http_post_json(
+            f"{ollama_host}/api/generate",
+            {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2},
+            },
         )
+        raw = response.get("response", "")
+        parsed = _safe_json_from_text(raw)
+    except Exception as exc:
+        logger.warning("ollama summarize failed: %s", exc)
+        parsed = None
+        raw = ""
+    if not parsed:
+        return _news_fallback_summary(ticker, title, url, body, raw_summary=raw)
 
     score = float(parsed.get("score", 0.0) or 0.0)
     score = max(-1.0, min(1.0, score))
@@ -380,6 +523,104 @@ def _llm_infer_news_summary(
         impact=impact,
         score=score if impact == "up" else (-score if impact == "down" else score * 0.25),
         keywords=_extract_keywords(parsed.get("keywords", "")),
+    )
+
+
+def _parse_news_published(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return int(text)
+        normalized = text.replace("Z", "+00:00")
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%f%z",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
+            try:
+                parsed = datetime.fromisoformat(normalized) if fmt.startswith("%Y-%m-%dT%H:%M") else datetime.strptime(normalized, fmt)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return int(parsed.timestamp())
+            except Exception:
+                continue
+    return None
+
+
+def _news_fallback_summary(
+    ticker: str,
+    title: str,
+    url: str,
+    body: str,
+    raw_summary: str | None = None,
+) -> NewsItem:
+    text = f"{title} {body}".lower()
+    positive_hits = sum(
+        1 for token in [
+            "급등",
+            "상향",
+            "호재",
+            "매수",
+            "개선",
+            "강세",
+            "이익",
+            "매출",
+            "beat",
+            "surge",
+            "growth",
+            "record",
+        ] if token in text
+    )
+    negative_hits = sum(
+        1 for token in [
+            "급락",
+            "하락",
+            "규제",
+            "적자",
+            "오류",
+            "리스크",
+            "약세",
+            "실적 악화",
+            "down",
+            "penalty",
+            "lawsuit",
+            "risk",
+            "fraud",
+        ] if token in text
+    )
+
+    if positive_hits and not negative_hits:
+        impact = "up"
+        score = min(0.45, 0.22 + min(0.23, positive_hits * 0.05))
+    elif negative_hits and not positive_hits:
+        impact = "down"
+        score = -(min(0.45, 0.22 + min(0.23, negative_hits * 0.05)))
+    else:
+        impact = "neutral"
+        score = 0.0
+    summary = (
+        (raw_summary or "").strip()[:300]
+        if raw_summary and raw_summary.strip()
+        else f"{ticker} 관련 뉴스 수집됨. 키워드 기반 폴백 분석 사용."
+    )
+    if not summary:
+        summary = f"{ticker} 관련 뉴스 수집됨. 키워드 기반 폴백 분석 사용."
+
+    return NewsItem(
+        title=title,
+        published=int(time.time()),
+        url=url,
+        summary=summary,
+        impact=impact,
+        score=score,
+        keywords=[],
     )
 
 
@@ -477,18 +718,44 @@ def _mock_news(ticker: str, limit: int) -> list[NewsItem]:
     return output
 
 
-def _is_cooldown_active(conn: sqlite3.Connection, ticker: str, cooldown_minutes: int) -> bool:
+def _is_cooldown_active(conn: sqlite3.Connection, ticker: str, signal: str, cooldown_minutes: int) -> bool:
     window = int((datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)).timestamp())
     row = conn.execute(
         """
-        SELECT signal, sent, ts FROM alerts
-        WHERE ticker = ? AND ts >= ?
+        SELECT ts FROM alerts
+        WHERE ticker = ? AND signal = ? AND ts >= ?
         ORDER BY ts DESC LIMIT 1
         """,
-        (ticker, window),
+        (ticker, signal, window),
     ).fetchone()
 
     return row is not None
+
+
+def _build_telegram_message(signal: Signal, latest_news: list[NewsItem]) -> str:
+    def _fmt(v: float | None) -> str:
+        return "n/a" if v is None else f"{v:.2f}"
+
+    def _shorten(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
+
+    lines = [
+        f"[{signal.ticker}] {signal.signal} ({signal.confidence:.2f})",
+        f"시간: {datetime.now(timezone.utc).isoformat()}",
+        f"가격: {signal.price:.2f}, SMA5={_fmt(signal.sma_fast)}, SMA20={_fmt(signal.sma_slow)}, RSI14={_fmt(signal.rsi)}",
+        f"근거: {signal.reason}",
+        "뉴스:",
+    ]
+    if latest_news:
+        for idx, item in enumerate(latest_news[:3], start=1):
+            lines.append(
+                f"{idx}. {item.impact.upper()}({item.score:+.2f}) {_shorten(item.title, 90)}"
+            )
+    else:
+        lines.append("1) 최근 반영 뉴스 없음")
+    return "\n".join(lines)[:3500]
 
 
 def _remember_prices(conn: sqlite3.Connection, ticker: str, points: list[PricePoint], source: str = "finnhub") -> None:
@@ -530,6 +797,7 @@ def _remember_news(conn: sqlite3.Connection, ticker: str, item: NewsItem, *, sou
 def _send_telegram(
     bot_token: str | None,
     chat_id: str | None,
+    parse_mode: str,
     text: str,
 ) -> bool:
     if not bot_token or not chat_id:
@@ -538,13 +806,22 @@ def _send_telegram(
 
     payload = {
         "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
+        "text": html.escape(text) if parse_mode == "HTML" else text,
     }
-    response = _http_post_json(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        payload,
-    )
+    if parse_mode != "NONE":
+        payload["parse_mode"] = parse_mode
+
+    try:
+        response = _http_post_json(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            payload,
+        )
+    except Exception as exc:
+        logger.warning("telegram send failed for token/chat=%s: %s", chat_id, exc)
+        return False
+
+    if not response.get("ok", False):
+        logger.warning("telegram API rejected request: %s", response)
     return bool(response.get("ok", False))
 
 
@@ -590,12 +867,18 @@ def run_once(settings: Settings) -> None:
                         ticker,
                         settings.marketaux_api_key,
                         limit=settings.max_news_per_ticker,
+                        lookback_hours=settings.news_lookback_hours,
                     )
+                    seen_news = set()
                     for n in raw_news:
                         title = (n.get("title") or "").strip()
                         url = n.get("url") or ""
                         if not title:
                             continue
+                        normalized_news_key = f"{ticker}:{url}:{title}"
+                        if normalized_news_key in seen_news:
+                            continue
+                        seen_news.add(normalized_news_key)
                         body = (n.get("description") or n.get("snippet") or "")[:1200]
                         item = _llm_infer_news_summary(
                             settings.ollama_host,
@@ -605,16 +888,25 @@ def run_once(settings: Settings) -> None:
                             url,
                             body,
                         )
-                        inserted = _remember_news(
+                        _remember_news(
                             conn,
                             ticker,
                             item,
                             source_url=url,
                         )
-                        if inserted:
-                            latest_news.append(item)
+                        latest_news.append(item)
+                elif not settings.dry_run:
+                    logger.info("marketaux key not set; skip news fetch for %s", ticker)
 
-                signal = build_signal(ticker, closes, latest_news)
+                signal = build_signal(
+                    ticker,
+                    closes,
+                    latest_news,
+                    trend_weight=settings.trend_weight,
+                    rsi_weight=settings.rsi_weight,
+                    news_weight=settings.news_weight,
+                    signal_threshold=settings.signal_threshold,
+                )
                 if signal is None:
                     continue
 
@@ -626,18 +918,15 @@ def run_once(settings: Settings) -> None:
                     logger.info("signal hold: %s", signal.reason)
                     continue
 
-                if _is_cooldown_active(conn, ticker, settings.cooldown_minutes):
+                if _is_cooldown_active(conn, ticker, signal.signal, settings.cooldown_minutes):
                     logger.info("skip due to cooldown: %s", ticker)
                     continue
 
-                message = (
-                    f"[ {signal.ticker} ] {signal.signal} ({signal.confidence:.2f})\n"
-                    f"시간: {datetime.now(timezone.utc).isoformat()}\n"
-                    f"근거: {signal.reason}\n"
-                )
+                message = _build_telegram_message(signal, latest_news)
                 sent = _send_telegram(
                     settings.telegram_bot_token,
                     settings.telegram_chat_id,
+                    settings.telegram_parse_mode,
                     message,
                 )
                 conn.execute(
