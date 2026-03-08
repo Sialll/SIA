@@ -3,34 +3,75 @@
 > 이 프로젝트의 목적: 
 > **자동 주문은 하지 않고, 로컬 LLM 보조로 시그널 근거를 계산해 텔레그램으로 매수/매도/관망 알림만 발송**한다.
 
+## Product Direction
+
+- 현재 구현은 `Telegram-only notifier`다.
+- 목표 제품은 `AI + Macro + Quant + Event`를 결합한 `local-first investment research engine`이다.
+- 상용 방향은 `자동매매`가 아니라 `분석 도구 판매`이며, 유료 버전은 직접적인 `BUY/SELL 추천`보다 `Composite Score`, `Risk Level`, `Macro Environment`, `Momentum` 중심으로 표현한다.
+- 장기 구조와 사업/법적 가정은 [product-architecture.md](/Users/dohyeon/Documents/Playground/SIA/docs/product-architecture.md)에 정리했다.
+
+## Current Phase
+
+- 현재 리포지토리는 `1단계 운영 코어`에 해당한다.
+- 구현 범위는 `가격/뉴스 수집 -> 점수 계산 -> Telegram 알림 -> DB 기록 -> HTML 리포트`다.
+- 기본 universe는 `시가총액 10억달러(약 1.4조원) 이상 대표 종목 seed set + 사용자 추가 티커` 구조다.
+- 주문 실행, 포트폴리오 체결, 투자자문형 추천 엔진은 포함하지 않는다.
+- 즉, 지금 코드는 `최종 제품의 collector + notifier slice`이며, 이후 대시보드/백테스트/리서치 기능이 위에 붙는 구조다.
+
 ## 한 줄 요약
 
 - 주기적으로 주가(종가 기반)와 뉴스 헤드라인을 수집한다.
+- 뉴스는 연중무휴 수집하고, 가격/신호는 활성 시장 장중에만 수집한다.
 - 간단한 기술적 지표(SMA/RSI)와 뉴스 임팩트를 합성해 신호를 만든다.
+- `VIX / 10Y / DXY / WTI / CPI` 같은 위험지표를 매크로 점수에 반영한다.
 - `BUY`/`SELL`/`HOLD` 신호가 생성되면 텔레그램으로 메시지를 전송한다.
+- 화면과 알림의 점수 표시는 `0~100점` 체계다. 내부 계산은 정규화 점수를 유지한다.
 - 주문 실행(자동매매)은 포함하지 않는다.
 
 ## 현재 코드 구조
 
 - `src/sia/trading_signal_notifier.py`
-  - 신호 계산, 데이터 수집, LLM 호출, DB 저장, 텔레그램 전송의 핵심 엔진
-- `src/sia/task_spec.py`
-  - 이슈 텍스트 파싱 도구(요구사항/조건/수용기준 추출)
-- `src/sia/pr_rules.py`
-  - PR 규칙(기본 1파일 변경 룰) 검사
-- `src/sia/cli.py`
-  - `parse-issue`, `check-pr` 서브커맨드 제공
+  - 메인 운영 엔진
+- `src/sia/notifier_config.py`
+  - 환경변수/시장 선택/시장별 티커 설정 로드
+- `src/sia/default_universe.py`
+  - 시장별 기본 1B+ seed universe
+- `src/sia/universe_collector.py`
+  - daily full-universe 확장용 스켈레톤과 universe snapshot 생성기
+- `src/sia/full_universe_collector.py`
+  - 전종목 1B+ universe provider 확장용 collector 골격
+- `src/sia/full_universe_report.py`
+  - full universe 후보 snapshot을 읽기용 HTML로 보여주는 리포트
+- `src/sia/market_runtime.py`
+  - 시장 활성 상태와 장 시간 판정
+- `src/sia/notifier_collector.py`
+  - 가격/뉴스/LLM 수집
+- `src/sia/notifier_storage.py`
+  - sqlite 저장, source 추론, snapshot 기록
+- `src/sia/notifier_scoring.py`, `src/sia/factor_engine.py`
+  - signal/composite score 계산
+- `src/sia/dashboard_report.py` 및 각 `*_report.py`
+  - dashboard / readiness / backtest / factor / research / data quality 리포트 렌더링
+- `scripts/SIA-*.command`
+  - 사용자용 더블클릭 진입점
+- `scripts/_internal/`
+  - 운영/검증/launchd/리포트 생성 내부 스크립트
 
 ## 실행 목적/인수인계 포인트
 
 1. **수신용 알림 시스템**으로 이해하고 코드/설정/환경변수를 확인하면 된다.
 2. **자동 주문 경로가 없으므로** 법적/운영 리스크를 줄이고 모니터링 중심으로 운영한다.
 3. 신호 정확성은 모델/임계치 변경으로 개선 가능하며, 핵심 포인트는 아래 설정값이다.
+   - `SIA_INCLUDE_DEFAULT_UNIVERSE`: 기본 1B+ universe 포함 여부
+   - `SIA_UNIVERSE_SNAPSHOT_PATH`: 유니버스 스냅샷 저장 경로
+   - `SIA_FULL_UNIVERSE_PROVIDER`: full universe 후보 수집 provider 이름
+   - `SIA_FULL_UNIVERSE_INPUT_PATH`: full universe 후보 입력 JSON 경로
+   - `SIA_FULL_UNIVERSE_SNAPSHOT_PATH`: full universe 스냅샷 저장 경로
    - `SIGNAL_COOLDOWN_MINUTES`: 동일 티커 반복 알림 억제 시간
    - `POLL_INTERVAL_MINUTES`: 수집 주기
    - `MAX_NEWS_PER_TICKER`: 뉴스 반영 건수
    - `SIGNAL_TREND_WEIGHT`, `SIGNAL_RSI_WEIGHT`, `SIGNAL_NEWS_WEIGHT`: 지표 가중치
-   - `SIGNAL_THRESHOLD`: BUY/SELL 임계치
+   - `SIGNAL_THRESHOLD`: BUY/SELL 임계치 (`0.35` 또는 `35` 입력 가능)
    - `OLLAMA_MODEL`: 로컬 LLM 모델
 
 ## 실행 방법
@@ -46,8 +87,15 @@
 
 ### 환경 변수
 
-- `TICKERS`: 모니터할 티커(쉼표 구분, 예: `AAPL,MSFT,TSM`)
+- `SIA_INCLUDE_DEFAULT_UNIVERSE`: 기본 1B+ seed universe 포함 여부(기본 `1`)
+- `TICKERS_US`, `TICKERS_KR`, `TICKERS_EU`, `TICKERS_JP`: 시장별 추가 티커
+- `TICKERS`: 미국 추가 티커 alias
 - `SIGNAL_DB_PATH`: DB 저장 경로(기본값 `data/trading_signal_notifier.sqlite`)
+- `SIA_UNIVERSE_SNAPSHOT_PATH`: 유니버스 스냅샷 경로(기본 `~/Library/Caches/sia-notifier/universe-snapshot.json`)
+- `SIA_FULL_UNIVERSE_PROVIDER`: full universe 후보 공급자 이름(기본 `manual_json`)
+- `SIA_FULL_UNIVERSE_INPUT_PATH`: full universe 후보 입력 경로(기본 `~/.config/sia-notifier/full-universe-candidates.json`)
+- `SIA_FULL_UNIVERSE_SNAPSHOT_PATH`: full universe 스냅샷 경로(기본 `~/Library/Caches/sia-notifier/full-universe-snapshot.json`)
+- `SIA_FULL_UNIVERSE_REPORT_PATH`: full universe 리포트 경로(기본 `~/Library/Caches/sia-notifier/full-universe-report.html`)
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 - `FINNHUB_API_KEY`, `MARKETAUX_API_KEY`
 - `OLLAMA_HOST`(기본 `http://localhost:11434`)
@@ -56,9 +104,11 @@
 - `SIGNAL_COOLDOWN_MINUTES`(기본 `30`)
 - `MAX_NEWS_PER_TICKER`(기본 `3`)
 - `NEWS_LOOKBACK_HOURS`(기본 `24`)
+- `FINNHUB_FAIL_THRESHOLD`(기본 `3`, 기본값 초과 실패 시 Yahoo 폴백 강제)
+- `FINNHUB_FAIL_WINDOW_MINUTES`(기본 `120`, 실패 이력 윈도우)
 - `TELEGRAM_PARSE_MODE`(`HTML`, `MARKDOWN`, `MARKDOWNV2`, `NONE`, 기본 `HTML`)
 - `SIGNAL_TREND_WEIGHT`(기본 `0.55`), `SIGNAL_RSI_WEIGHT`(기본 `0.25`), `SIGNAL_NEWS_WEIGHT`(기본 `0.20`)
-- `SIGNAL_THRESHOLD`(기본 `0.35`)
+- `SIGNAL_THRESHOLD`(기본 `35`, `0.35`도 허용)
 
 ### 실행 예시
 
@@ -92,39 +142,129 @@ API/네트워크 없이 동작 확인:
 python -m sia.trading_signal_notifier --dry-run --once
 ```
 
+원클릭 사전 점검(권장):
+
+```bash
+./scripts/_internal/sia-notifier-preflight.command
+```
+
+동작 순서: Finnhub 키(있는 경우) 점검 → Telegram 점검(설정된 경우) → dry-run 1회 실행.
+
+텔레그램 연동 점검:
+
+```bash
+./scripts/_internal/sia-notifier-check-telegram.command
+```
+
+위 스크립트는 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 값으로 `getMe`, `getChat` API 응답을 먼저 확인해
+텔레그램 연결 상태를 빠르게 점검합니다.
+
 ### 신호 튜닝 프리셋(실행 예시)
 
-기본값은 `trend=0.55 / rsi=0.25 / news=0.20 / threshold=0.35`입니다.
+기본값은 `trend=0.55 / rsi=0.25 / news=0.20 / threshold=35점`입니다.
 
 - 보수형(신호 빈도 낮춤)
 
 ```bash
 python -m sia.trading_signal_notifier --once --tickers AAPL,MSFT \
-  --trend-weight 0.6 --rsi-weight 0.2 --news-weight 0.2 --signal-threshold 0.45
+  --trend-weight 0.6 --rsi-weight 0.2 --news-weight 0.2 --signal-threshold 45
 ```
 
 - 균형형(기본값)
 
 ```bash
 python -m sia.trading_signal_notifier --once --tickers AAPL,MSFT \
-  --trend-weight 0.55 --rsi-weight 0.25 --news-weight 0.20 --signal-threshold 0.35
+  --trend-weight 0.55 --rsi-weight 0.25 --news-weight 0.20 --signal-threshold 35
 ```
 
 - 공격형(신호 빈도 증가)
 
 ```bash
 python -m sia.trading_signal_notifier --once --tickers AAPL,MSFT \
-  --trend-weight 0.45 --rsi-weight 0.25 --news-weight 0.30 --signal-threshold 0.25
+  --trend-weight 0.45 --rsi-weight 0.25 --news-weight 0.30 --signal-threshold 25
 ```
 
-Mac에서는 더블클릭 실행용으로 `scripts/sia-notifier-launch.command`를 두 번 클릭할 수 있습니다.  
+Mac에서는 더블클릭 실행용으로 `scripts/SIA-Run.command`를 두 번 클릭할 수 있습니다.  
 실행 후 마지막 로그를 바탕으로 `last-run.html` 리포트가 자동 열림 상태로 남습니다.
+
+### 리서치 리포트
+
+기존 `dashboard_snapshots` 데이터를 재활용해 가벼운 백테스트/리서치 리포트를 만들 수 있습니다.
+
+```bash
+./scripts/_internal/sia-research-report.command
+```
+
+생성 파일:
+
+- `~/Library/Caches/sia-notifier/research-report.html`
+
+기준:
+
+- 외부 API를 다시 호출하지 않음
+- 같은 티커의 다음 `N snapshot` 가격을 기준으로 미래 성과 계산
+- 기본 horizon: `1,3,5`
+
+### 기본 유니버스 문서
+
+현재 기본 1B+ seed universe 목록은 아래 문서에 정리했습니다.
+
+- [default-universe.md](/Users/dohyeon/Documents/Playground/SIA/docs/default-universe.md)
+
+중요:
+
+- 현재는 `전종목 전체`가 아니라 운영 가능한 `seed universe`
+- 장기적으로는 `daily universe collector`를 붙여 full universe로 확장
+
+### 유니버스 스냅샷 생성 스켈레톤
+
+현재 full universe 확장용 골격이 들어가 있습니다.
+
+```bash
+./scripts/_internal/sia-universe-refresh.command
+```
+
+생성 파일:
+
+- `~/Library/Caches/sia-notifier/universe-snapshot.json`
+
+현재 역할:
+
+- 활성 시장 기준 기본 seed universe + 사용자 추가 티커를 JSON snapshot으로 저장
+- 아직 `전 시장 1B+ 전종목 수집`은 하지 않음
+- 나중에 market-cap provider를 붙일 자리만 먼저 만들어 둔 상태
+
+### full universe collector 골격
+
+실제 `전종목 1B+ universe` 확장은 별도 collector 축으로 분리해 두었습니다.
+
+```bash
+./scripts/_internal/sia-full-universe-refresh.command
+```
+
+생성 파일:
+
+- `~/Library/Caches/sia-notifier/full-universe-snapshot.json`
+
+현재 역할:
+
+- `manual_json` provider로 후보 리스트를 읽어 활성 시장 + 시가총액 기준으로 필터링
+- 아직 외부 market-cap provider를 직접 호출하지 않음
+- runtime watchlist와 분리된 `전종목 후보 universe` 스냅샷만 생성
+
+샘플 입력 파일:
+
+- `~/.config/sia-notifier/full-universe-candidates.json`
+
+읽기용 HTML 리포트:
+
+- `~/Library/Caches/sia-notifier/full-universe-report.html`
 
 ### 실행기 프리셋 사용법
 
-- 균형형(기본): `open scripts/sia-notifier-launch.command balanced`
-- 보수형: `open scripts/sia-notifier-launch.command conservative`
-- 공격형: `open scripts/sia-notifier-launch.command aggressive`
+- 균형형(기본): `open scripts/_internal/sia-notifier-launch.command balanced`
+- 보수형: `open scripts/_internal/sia-notifier-launch.command conservative`
+- 공격형: `open scripts/_internal/sia-notifier-launch.command aggressive`
 
 각 모드가 실행 시 내부적으로 `--trend-weight`, `--rsi-weight`, `--news-weight`, `--signal-threshold`를 자동 적용합니다.
 
@@ -133,9 +273,11 @@ Mac에서는 더블클릭 실행용으로 `scripts/sia-notifier-launch.command`�
 1. 수집: Finnhub 일봉 클로즈 + Marketaux 뉴스 2~3건
 2. 처리:
    - 종가 시퀀스로 SMA(5/20), RSI(14) 계산
+   - `VIX / 10Y / DXY / WTI / CPI`로 매크로 위험 점수 계산
    - 뉴스는 Ollama에서 요약/감성 점수 추출
 3. 신호 결합:
-   - 추세/RSI/뉴스 가중치(기본 55/25/20)로 BUY/SELL/HOLD 판단
+   - 추세/RSI/뉴스 + 매크로/이벤트 보정으로 BUY/SELL/HOLD 판단
+   - 사용자에게 보이는 점수는 `0~100점`
 4. 알림:
    - `HOLD`는 DB에 기록만 하고 전송 생략 가능
    - 동일 티커 30분(기본) 이내 중복 알림 차단
@@ -177,6 +319,11 @@ macOS 기준 `$HOME/.config/sia-notifier/env` 예시:
 
 ```bash
 export TICKERS="AAPL,MSFT,TSLA"
+export SIA_INCLUDE_DEFAULT_UNIVERSE="1"
+export TICKERS_US="AAPL,MSFT"
+export TICKERS_KR=""
+export TICKERS_EU=""
+export TICKERS_JP=""
 export SIGNAL_DB_PATH="/Users/dohyeon/sia-notifier/trading_signal_notifier.sqlite"
 export TELEGRAM_BOT_TOKEN="..."
 export TELEGRAM_CHAT_ID="..."
@@ -188,11 +335,13 @@ export POLL_INTERVAL_MINUTES="15"
 export SIGNAL_COOLDOWN_MINUTES="30"
 export MAX_NEWS_PER_TICKER="3"
 export NEWS_LOOKBACK_HOURS="24"
+export FINNHUB_FAIL_THRESHOLD="3"
+export FINNHUB_FAIL_WINDOW_MINUTES="120"
 export TELEGRAM_PARSE_MODE="HTML"
 export SIGNAL_TREND_WEIGHT="0.55"
 export SIGNAL_RSI_WEIGHT="0.25"
 export SIGNAL_NEWS_WEIGHT="0.20"
-export SIGNAL_THRESHOLD="0.35"
+export SIGNAL_THRESHOLD="35"
 export PYTHONPATH="/Users/dohyeon/Documents/Playground/SIA/src"
 ```
 
@@ -200,48 +349,27 @@ export PYTHONPATH="/Users/dohyeon/Documents/Playground/SIA/src"
 
 ### macOS (launchd)
 
-`~/Library/LaunchAgents/com.sia.trading-signal-notifier.plist` 예시:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>com.sia.trading-signal-notifier</string>
-    <key>ProgramArguments</key>
-    <array>
-      <string>/usr/bin/python3</string>
-      <string>-m</string>
-      <string>sia.trading_signal_notifier</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/Users/dohyeon/Documents/Playground/SIA</string>
-    <key>EnvironmentFile</key>
-      <string>/Users/dohyeon/.config/sia-notifier/env</string>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/dohyeon/Library/Logs/sia-notifier.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/dohyeon/Library/Logs/sia-notifier.err.log</string>
-  </dict>
-</plist>
-```
+현재는 plist를 수동 작성하지 않고 내부 스크립트로 설치하는 방식을 권장합니다.
 
 적용 명령:
 
 ```bash
-launchctl bootout gui/$UID ~/Library/LaunchAgents/com.sia.trading-signal-notifier.plist || true
-launchctl load -w ~/Library/LaunchAgents/com.sia.trading-signal-notifier.plist
+./scripts/_internal/sia-notifier-launchd.command install balanced
+./scripts/_internal/sia-notifier-launchd.command status
 ```
 
 로그 확인:
 
 ```bash
-tail -f ~/Library/Logs/sia-notifier.out.log
+tail -f ~/Library/Caches/sia-notifier/launchd.out.log
+tail -f ~/Library/Caches/sia-notifier/launchd.err.log
 ```
+
+관련 launchd:
+
+- 알림 엔진: `./scripts/_internal/sia-notifier-launchd.command`
+- 야간 백테스트 리프레시: `./scripts/_internal/sia-backtest-refresh-launchd.command`
+- 준비도 가드: `./scripts/_internal/sia-ready-buckets-launchd.command`
 
 ### Linux (systemd)
 
@@ -279,104 +407,41 @@ sudo systemctl status sia-notifier
 
 ### 실행 전 점검
 
-- `python3 -m sia.trading_signal_notifier --dry-run --once`로 환경/DB/권한을 먼저 확인
+- `./scripts/_internal/sia-notifier-preflight.command`로 환경/권한/API 기본 점검
+- `./scripts/_internal/sia-notifier-live-quickcheck.command balanced`로 드라이런 검증
 - 데이터 저장 경로 권한(`SIGNAL_DB_PATH`)과 로그 디렉터리 권한을 먼저 확인
 - Telegram으로 샘플 알림 1회가 오면 상시 실행으로 전환
 
 ### 통합 설치 스크립트(가볍게)
 
-한 번 복사해서 바로 쓰기 좋은 최소 스크립트입니다.
+현재 macOS 운영은 임시 bootstrap 스크립트보다 아래 조합을 권장합니다.
 
 ```bash
-cat >/tmp/sia-notifier-bootstrap.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-MODE="${1:-install}"
-if [[ "$MODE" != install && "$MODE" != uninstall ]]; then
-  echo "Usage: $0 [install|uninstall]"; exit 1
-fi
-
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  # macOS
-  ENV_FILE="$HOME/.config/sia-notifier/env"
-  PLIST="$HOME/Library/LaunchAgents/com.sia.trading-signal-notifier.plist"
-  if [[ "$MODE" == "install" ]]; then
-    cat > "$ENV_FILE" <<'ENV'
-export TICKERS="AAPL,MSFT,TSLA"
-export SIGNAL_DB_PATH="/Users/dohyeon/sia-notifier/trading_signal_notifier.sqlite"
-export OLLAMA_MODEL="phi3:mini"
-export PYTHONPATH="/Users/dohyeon/Documents/Playground/SIA/src"
-ENV
-    chmod 600 "$ENV_FILE"
-    cat > "$PLIST" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.sia.trading-signal-notifier</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>-m</string><string>sia.trading_signal_notifier</string></array>
-  <key>WorkingDirectory</key><string>/Users/dohyeon/Documents/Playground/SIA</string>
-  <key>EnvironmentFile</key><string>$ENV_FILE</string>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/sia-notifier/sia-notifier.out.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/sia-notifier/sia-notifier.err.log</string>
-</dict></plist>
-PLIST
-    chmod 600 "$PLIST"
-    launchctl bootout gui/"$(id -u)" "$PLIST" || true
-    launchctl load -w "$PLIST"
-  else
-    launchctl bootout gui/"$(id -u)" "$PLIST" || true; rm -f "$PLIST"
-  fi
-else
-  # Linux
-  ENV_FILE="/etc/sia-notifier/env"
-  SERVICE="/etc/systemd/system/sia-notifier.service"
-  if [[ "$MODE" == "install" ]]; then
-    sudo mkdir -p /etc/sia-notifier /var/log/sia-notifier
-    cat > "$ENV_FILE" <<'ENV'
-export TICKERS="AAPL,MSFT,TSLA"
-export SIGNAL_DB_PATH="/home/dohyeon/sia-notifier/trading_signal_notifier.sqlite"
-export OLLAMA_MODEL="phi3:mini"
-export PYTHONPATH="/home/dohyeon/Documents/Playground/SIA/src"
-ENV
-    sudo chmod 600 "$ENV_FILE"
-    sudo tee "$SERVICE" >/dev/null <<'UNIT'
-[Unit]
-Description=SIA Trading Signal Notifier
-After=network.target
-[Service]
-Type=simple
-User=dohyeon
-WorkingDirectory=/home/dohyeon/Documents/Playground/SIA
-EnvironmentFile=/etc/sia-notifier/env
-Environment="PYTHONPATH=/home/dohyeon/Documents/Playground/SIA/src"
-ExecStart=/usr/bin/python3 -m sia.trading_signal_notifier
-Restart=always
-[Install]
-WantedBy=multi-user.target
-UNIT
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now sia-notifier
-  else
-    sudo systemctl disable --now sia-notifier || true
-    sudo rm -f "$SERVICE"
-    sudo systemctl daemon-reload
-  fi
-fi
-echo "done"
-EOF
-
-chmod +x /tmp/sia-notifier-bootstrap.sh
-echo "Run: /tmp/sia-notifier-bootstrap.sh install"
-echo "Run: /tmp/sia-notifier-bootstrap.sh uninstall"
+cat scripts/_internal/sia-notifier-env.example > ~/.config/sia-notifier/env
+./scripts/_internal/sia-notifier-preflight.command
+./scripts/_internal/sia-notifier-launchd.command install balanced
 ```
+
+시장 설정이 필요하면 아래를 추가로 사용합니다.
+
+```bash
+./scripts/_internal/sia-market-settings.command
+./scripts/_internal/sia-market-tickers.command
+```
+
+시장 설정 정책:
+
+- 기본 활성 시장: `US`
+- 기본 universe: 시장별 `시가총액 10억달러 이상 대표 종목 seed set`
+- 사용자 입력 티커: 기본 universe에 추가
+- 필요하면 `SIA_INCLUDE_DEFAULT_UNIVERSE=0`으로 기본 universe를 끌 수 있음
 
 ### 초기 셋업 상태 확인 (가볍게)
 
 ```bash
 ollama list | grep -q "phi3:mini" && echo "phi3:mini: ok" || echo "phi3:mini: missing"
 /Users/dohyeon/bin/gh auth status || echo "gh: not logged in"
-python3 -m sia.trading_signal_notifier --dry-run --once
+./scripts/_internal/sia-notifier-live-quickcheck.command balanced
 ```
 
 GitHub 인증은 아래 1회로 마무리:
@@ -387,72 +452,19 @@ GitHub 인증은 아래 1회로 마무리:
 
 ### 더블클릭 실행 + HTML 보기 (macOS)
 
-아래를 한 번 저장하고, `~/Desktop/sia-notifier-launch.command`로 옮긴 뒤 `두 번 클릭`하면 프로그램이 실행되고 결과가 브라우저에서 HTML로 열립니다.
+이미 저장소에 더블클릭 실행기가 포함되어 있습니다.
 
-```bash
-cat >/tmp/sia-notifier-launch.command <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+- 엔진 실행: `scripts/SIA-Run.command`
+- 대시보드: `scripts/SIA-Dashboard.command`
+- 리포트 허브: `scripts/SIA-Reports.command`
+- 시장 선택: `scripts/SIA-Market-Settings.command`
+- 시장별 티커 편집: `scripts/SIA-Market-Tickers.command`
 
-REPO_DIR="/Users/dohyeon/Documents/Playground/SIA"
-REPORT_DIR="$HOME/Library/Caches/sia-notifier"
-OUT_HTML="$REPORT_DIR/last-run.html"
-DB_PATH="/Users/dohyeon/sia-notifier/trading_signal_notifier.sqlite"
+생성되는 주요 HTML:
 
-mkdir -p "$REPORT_DIR"
-cd "$REPO_DIR"
-
-python3 -m sia.trading_signal_notifier --once > "$REPORT_DIR/run.log" 2>&1 || true
-
-python3 - "$OUT_HTML" "$DB_PATH" <<'PY'
-import sqlite3
-import sys
-from datetime import datetime
-
-html_path, db_path = sys.argv[1], sys.argv[2]
-rows = []
-error = ""
-
-try:
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT ts, ticker, signal, confidence, sent, COALESCE(error_message, '')"
-            " FROM alerts ORDER BY ts DESC LIMIT 20"
-        ).fetchall()
-except Exception as exc:
-    error = f"DB read error: {exc}"
-
-def h(v):
-    return str(v).replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
-
-now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-rows_html = []
-for ts, ticker, signal, confidence, sent, err in rows:
-    t = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    rows_html.append(
-        f"<tr><td>{t}</td><td>{h(ticker)}</td><td>{h(signal)}</td>"
-        f"<td>{confidence:.2f}</td><td>{sent}</td><td>{h(err)}</td></tr>"
-    )
-
-with open(html_path, "w", encoding="utf-8") as f:
-    f.write("<!doctype html><html><head><meta charset='utf-8'><title>SIA Notifier Run</title></head><body>")
-    f.write(f"<h2>SIA Notifier Run</h2><p>time: {h(now)}</p>")
-    if error:
-        f.write(f"<p style='color:#cc0000'>{h(error)}</p>")
-    f.write("<table border='1' cellpadding='4'>")
-    f.write("<tr><th>time</th><th>ticker</th><th>signal</th><th>confidence</th><th>sent</th><th>error</th></tr>")
-    f.write("".join(rows_html))
-    f.write("</table><p><a href='run.log'>run.log</a></p></body></html>")
-PY
-
-open "$OUT_HTML"
-EOF
-
-chmod +x /tmp/sia-notifier-launch.command
-cp /tmp/sia-notifier-launch.command "$HOME/Desktop/sia-notifier-launch.command"
-chmod +x "$HOME/Desktop/sia-notifier-launch.command"
-echo "생성됨: ~/Desktop/sia-notifier-launch.command (Finder에서 두 번 클릭)"
-```
+- `~/Library/Caches/sia-notifier/last-run.html`
+- `~/Library/Caches/sia-notifier/dashboard.html`
+- `~/Library/Caches/sia-notifier/report-hub.html`
 
 텔레그램 알림 기본 동작
 
@@ -461,74 +473,11 @@ echo "생성됨: ~/Desktop/sia-notifier-launch.command (Finder에서 두 번 클
 
 #### Windows에서도 같은 방식으로 실행(선택)
 
-```powershell
-$psContent = @'
-param()
-$ErrorActionPreference = "Stop"
-$REPO_DIR = "$env:USERPROFILE\Documents\Playground\SIA"
-$REPORT_DIR = "$env:LOCALAPPDATA\sia-notifier"
-$OUT_HTML = Join-Path $REPORT_DIR "last-run.html"
-$DB_PATH = "$env:USERPROFILE\sia-notifier\trading_signal_notifier.sqlite"
-$PY_SCRIPT = Join-Path $env:TEMP "sia_notifier_report.py"
-
-New-Item -ItemType Directory -Path $REPORT_DIR -Force | Out-Null
-Set-Location $REPO_DIR
-python -m sia.trading_signal_notifier --once *> (Join-Path $REPORT_DIR "run.log")
-
-$pythonCode = @'
-import sqlite3
-import sys
-from datetime import datetime
-
-html_path, db_path = sys.argv[1], sys.argv[2]
-rows = []
-error = ""
-
-try:
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT ts, ticker, signal, confidence, sent, COALESCE(error_message, '')"
-            " FROM alerts ORDER BY ts DESC LIMIT 20"
-        ).fetchall()
-except Exception as exc:
-    error = f"DB read error: {exc}"
-
-def h(v):
-    return str(v).replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
-
-now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-lines = []
-for ts, ticker, signal, confidence, sent, err in rows:
-    t = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    lines.append(
-        f"<tr><td>{t}</td><td>{h(ticker)}</td><td>{h(signal)}</td><td>{confidence:.2f}</td><td>{sent}</td><td>{h(err)}</td></tr>"
-    )
-
-with open(html_path, "w", encoding="utf-8") as f:
-    f.write("<!doctype html><html><head><meta charset='utf-8'><title>SIA Notifier Run</title></head><body>")
-    f.write(f"<h2>SIA Notifier Run</h2><p>time: {h(now)}</p>")
-    if error:
-        f.write(f"<p style='color:#cc0000'>{h(error)}</p>")
-    f.write("<table border='1' cellpadding='4'>")
-    f.write("<tr><th>time</th><th>ticker</th><th>signal</th><th>confidence</th><th>sent</th><th>error</th></tr>")
-    f.write("".join(lines))
-    f.write("</table><p><a href='run.log'>run.log</a></p></body></html>")
-'@
-
-Set-Content -Path $PY_SCRIPT -Value $pythonCode -Encoding UTF8
-python $PY_SCRIPT $OUT_HTML $DB_PATH
-Start-Process $OUT_HTML
-Remove-Item $PY_SCRIPT -ErrorAction SilentlyContinue
-'@
-
-Set-Content -Path "$env:USERPROFILE\Desktop\sia-notifier-launch.ps1" -Value $psContent -Encoding UTF8
-Write-Host "Saved: $env:USERPROFILE\Desktop\sia-notifier-launch.ps1"
-```
-
-실행하면 바탕 화면의 `sia-notifier-launch.ps1`이 만들어집니다.  
-더블클릭 실행하려면 먼저 PowerShell 실행 정책을 허용하고:
+Windows는 내부 PowerShell 실행기를 직접 사용합니다.
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
-& "$env:USERPROFILE\Desktop\sia-notifier-launch.ps1"
+.\scripts\_internal\sia-notifier-launch.ps1
 ```
+
+현재 Windows 쪽은 macOS의 `SIA-*` 래퍼처럼 상단 사용자용 파일 분리가 적용되어 있지 않고, 내부 실행기 기준으로 유지됩니다.

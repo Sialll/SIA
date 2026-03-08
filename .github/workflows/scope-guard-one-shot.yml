@@ -1,0 +1,59 @@
+name: Scope Guard One-shot
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Check mode
+        required: true
+        default: open
+        type: choice
+        options:
+          - open
+          - range
+      start_pr:
+        description: Start PR number (used when mode=range)
+        required: false
+        default: "1"
+      end_pr:
+        description: End PR number (used when mode=range)
+        required: false
+        default: "8"
+      apply_template:
+        description: Auto-apply scope fix template
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  one-shot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run scope guard one-shot
+        env:
+          SCOPE_GUARD_APPLY_TEMPLATE: ${{ github.event.inputs.apply_template }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          chmod +x ./scripts/scope-guard-one-shot.sh
+
+          if [[ "${{ github.event.inputs.mode }}" == "open" ]]; then
+            ./scripts/scope-guard-one-shot.sh open
+          else
+            ./scripts/scope-guard-one-shot.sh "${{ github.event.inputs.start_pr }}" "${{ github.event.inputs.end_pr }}"
+          fi

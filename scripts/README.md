@@ -1,120 +1,188 @@
-# SIA Double-Click Launcher
+# SIA Scripts Guide
 
-Mac
-- 더블클릭 실행 파일: `scripts/sia-notifier-launch.command`
-- 동작: `trading_signal_notifier`를 1회 실행 후, 결과를 `last-run.html`로 생성해서 브라우저로 열어줍니다.
-- 기본 저장소: `~/Library/Caches/sia-notifier/last-run.html`
-- 동시 실행 방지 락: 스크립트는 실행 중 중복 실행을 차단합니다.
+현재 구조는 `단일 사용자용 실행기`와 `내부 운영 스크립트`로 분리되어 있습니다.
 
-Windows
-- 더블클릭 실행 파일: `scripts/sia-notifier-launch.ps1`
-- 동작: `trading_signal_notifier --once` 실행 후, HTML 리포트 자동 생성/오픈
-- 기본 저장소: `$env:LOCALAPPDATA\sia-notifier\last-run.html`
+## 1. 사용자용 더블클릭 실행기
 
-Mac launchd 자동실행
+Finder에서 바로 실행할 기본 파일은 아래 1개입니다.
 
-목적: 15분(기본) 간격으로 백그라운드 실행.
+- `scripts/SIA.command`
+  - 단일 실행기. 실전/드라이런/대시보드/리포트/시장 설정/티커 설정을 한 번에 선택
 
-설치
-```bash
-./scripts/sia-notifier-launchd.command install balanced
-```
+보조 실행기는 아래에 남겨둡니다.
 
-제거
-```bash
-./scripts/sia-notifier-launchd.command uninstall
-```
+- `scripts/SIA-Run.command`
+  - 알림 엔진 1회 실행
+- `scripts/SIA-Dashboard.command`
+  - 대시보드 생성/오픈
+- `scripts/SIA-Reports.command`
+  - 리포트 허브 생성/오픈
+- `scripts/SIA-Market-Settings.command`
+  - 활성 시장 선택
+- `scripts/SIA-Market-Tickers.command`
+  - 시장별 티커 편집
 
-실행 간격 변경
-```bash
-SIA_POLL_MINUTES=30 ./scripts/sia-notifier-launchd.command install conservative
-```
+## 2. 내부 운영 스크립트
 
-생성 위치
-`~/Library/LaunchAgents/com.sia.trading-signal-notifier.plist`
+실제 동작 로직은 모두 `scripts/_internal/` 아래에 있습니다.
 
-로그 저장
-`~/Library/Caches/sia-notifier/launchd.out.log`
-`~/Library/Caches/sia-notifier/launchd.err.log`
+- 운영 엔진
+  - `scripts/_internal/sia-notifier-launch.command`
+  - `scripts/_internal/sia-notifier-launchd.command`
+- 점검/검증
+  - `scripts/_internal/sia-notifier-preflight.command`
+  - `scripts/_internal/sia-notifier-check-finnhub.command`
+  - `scripts/_internal/sia-notifier-check-telegram.command`
+  - `scripts/_internal/sia-notifier-live-quickcheck.command`
+  - `scripts/_internal/sia-notifier-live-acceptance.command`
+- 리포트
+  - `scripts/_internal/sia-dashboard.command`
+  - `scripts/_internal/sia-report-hub.command`
+  - `scripts/_internal/sia-universe-refresh.command`
+  - `scripts/_internal/sia-full-universe-refresh.command`
+  - `scripts/_internal/sia-full-universe-report.command`
+  - `scripts/_internal/sia-data-quality.command`
+  - `scripts/_internal/sia-backtest-readiness.command`
+  - `scripts/_internal/sia-price-backtest.command`
+  - `scripts/_internal/sia-position-backtest.command`
+  - `scripts/_internal/sia-factor-breakdown.command`
+  - `scripts/_internal/sia-research-report.command`
+- 운영 보조
+  - `scripts/_internal/sia-backtest-refresh.command`
+  - `scripts/_internal/sia-backtest-refresh-launchd.command`
+  - `scripts/_internal/sia-ready-buckets-guard.command`
+  - `scripts/_internal/sia-ready-buckets-launchd.command`
 
-원클릭 실행 체크리스트(권장)
+## 2.1 Windows 백업 실행기
 
-- 환경 파일 생성
-  - `mkdir -p ~/.config/sia-notifier`
-  - `cat scripts/sia-notifier-env.example > ~/.config/sia-notifier/env`
-  - `chmod 600 ~/.config/sia-notifier/env`
-- 값 입력 확인
-  - `TICKERS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `FINNHUB_API_KEY` 설정 확인
-  - `__YOUR_*`, `dummy`, `placeholder` 형태의 가짜값은 실행이 차단됩니다.
-- Finnhub 키 선검증
-  - `./scripts/sia-notifier-check-finnhub.command`
-  - `403` 반환은 키 자체는 맞아도 `stock/candle` 권한이 없는 경우가 많음(차트 신호는 fallback 동작).
-- 더블클릭 모드 체크
-  - `SIA_DRY_RUN=1 TICKERS=AAPL,MSFT SIGNAL_DB_PATH=/tmp/sia_notifier.sqlite ./scripts/sia-notifier-launch.command balanced`
-- 검증 전용 실행(권장): `./scripts/sia-notifier-live-quickcheck.command balanced`
-- launchd 등록(선택)
-  - `./scripts/sia-notifier-launchd.command install balanced`
-- 동작 확인
-  - `cat ~/Library/Caches/sia-notifier/last-run.html`
-  - `tail -n 40 ~/Library/Caches/sia-notifier/run.log`
-- 실전 전환 전
-  - `./scripts/sia-notifier-check-finnhub.command`
-- 주기 변경(원하면)
-  - `SIA_POLL_MINUTES=30 ./scripts/sia-notifier-launchd.command install conservative`
+Windows용 백업 래퍼는 `scripts/windows-launchers/` 아래에 있습니다.
 
-주의
-- 텔레그램은 기본 포함입니다. `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`를 환경변수에 설정해야 전송합니다.
-- 실행 시 `TICKERS`와 API 키가 미설정이면 기존 동작 정책에 따라 확인/오류가 기록됩니다.
+- `scripts/windows-launchers/SIA.cmd`
+- `scripts/windows-launchers/SIA.ps1`
+- `scripts/windows-launchers/SIA-Run.cmd`
+- `scripts/windows-launchers/SIA-Dashboard.cmd`
+- `scripts/windows-launchers/SIA-Reports.cmd`
+- `scripts/windows-launchers/SIA-Market-Settings.cmd`
+- `scripts/windows-launchers/SIA-Market-Tickers.cmd`
+- `scripts/windows-launchers/*.ps1`
 
-### PR 사전 점검 스크립트(권장)
+## 3. macOS 기본 사용 흐름
 
-PR 본문 + 변경 파일을 한 번에 점검해 실패 원인을 즉시 확인합니다.
+### 빠른 실행
 
-```bash
-./scripts/scope-guard-pr-preflight.sh --pr <PR번호>
-./scripts/scope-guard-pr-preflight.sh --pr <PR번호> --apply-template
-./scripts/scope-guard-pr-preflight.sh --pr <PR번호> --no-check-pr --apply-template
-./scripts/scope-guard-pr-preflight.sh --body-file /tmp/pr-body.md --no-check-pr
-```
+- 엔진 실행: `scripts/SIA-Run.command`
+- 대시보드 확인: `scripts/SIA-Dashboard.command`
+- 리포트 허브 확인: `scripts/SIA-Reports.command`
 
-실패 시:
-- `--apply-template`을 함께 쓰면 `gh-apply-scope-fix-template.sh`를 이어서 호출해 PR 본문에 Fix 템플릿을 붙입니다.
-
-### PR 게이트 스크립트(한 번에 실행)
-
-`parse-issue`, `check-pr`, 실패 시 `Scope Fix` 자동 보강까지 한 번에 수행하는 통합 래퍼입니다.
+### 환경 파일 준비
 
 ```bash
-./scripts/scope-guard-gate.sh --pr <PR번호>
-./scripts/scope-guard-gate.sh --pr <PR번호> --apply-template
-./scripts/scope-guard-gate.sh --pr <PR번호> --no-check-pr --apply-template --dry-run-template
-./scripts/scope-guard-gate.sh --body-file /tmp/pr-body.md --no-check-pr
+mkdir -p ~/.config/sia-notifier
+cat scripts/_internal/sia-notifier-env.example > ~/.config/sia-notifier/env
+chmod 600 ~/.config/sia-notifier/env
 ```
 
-주의:
-- `--body-file` 입력은 임시 PR 텍스트 점검용이라 템플릿 자동 적용(`--apply-template`)은 동작하지 않습니다.
-- `--pr`와 `--body-file`은 동시에 사용할 수 없습니다.
-- 실패 재시도는 `--dry-run-template`으로 본문 미리보기를 확인한 뒤 실제 적용하세요.
-
-실패 시:
-- `--apply-template`이 활성화되어 있으면 PR 본문 텍스트가 실패한 `parse-issue --strict` 항목 기준으로 템플릿 자동 보강 후 1회 재검증합니다.
-- `--dry-run-template`을 쓰면 실제 PR 수정 없이 미리보기만 보여줍니다.
-- `--pr`를 생략하면 현재 브랜치와 연결된 열린 PR을 자동 탐지합니다(`body-file` 미지정 시).
-- 기본 `check-pr` 기준 브랜치는 `origin/main`입니다(필요 시 `--base`로 오버라이드).
-
-### PR 가드 템플릿 자동 반영 (오류 방지 스킬)
-
-- 용도: `parse-issue --strict`에서 실패했을 때 PR 본문에 재요청용 템플릿을 자동으로 붙입니다.
-- 파일: `scripts/gh-apply-scope-fix-template.sh`
-- 템플릿: `scripts/scope-guard-fix-template.md`
+### 사전 점검
 
 ```bash
-# 실행(기본: 본문 상단에 템플릿 추가)
-./scripts/gh-apply-scope-fix-template.sh --pr <PR번호>
-
-# 코드 자동 채우기 실패 시 수동 코드 지정
-./scripts/gh-apply-scope-fix-template.sh --pr <PR번호> --codes "SCOPE-MISSING-TITLE,SCOPE-OPS-SOFT"
-
-# 실제 적용 전 내용 미리보기
-./scripts/gh-apply-scope-fix-template.sh --pr <PR번호> --dry-run
+./scripts/_internal/sia-notifier-preflight.command
+./scripts/_internal/sia-notifier-check-telegram.command
+./scripts/_internal/sia-notifier-check-finnhub.command
+./scripts/_internal/sia-notifier-live-quickcheck.command balanced
 ```
+
+### 실전/드라이런
+
+```bash
+./scripts/_internal/sia-notifier-launch.command balanced --live
+./scripts/_internal/sia-notifier-launch.command balanced --dry-run
+```
+
+### 리포트 재생성
+
+```bash
+./scripts/_internal/sia-dashboard.command
+./scripts/_internal/sia-report-hub.command
+./scripts/_internal/sia-data-quality.command
+./scripts/_internal/sia-backtest-readiness.command
+./scripts/_internal/sia-backtest-refresh.command
+```
+
+## 4. launchd 자동 실행
+
+설치:
+
+```bash
+./scripts/_internal/sia-notifier-launchd.command install balanced
+```
+
+제거:
+
+```bash
+./scripts/_internal/sia-notifier-launchd.command uninstall
+```
+
+상태:
+
+```bash
+./scripts/_internal/sia-notifier-launchd.command status
+```
+
+야간 백테스트 리프레시:
+
+```bash
+./scripts/_internal/sia-backtest-refresh-launchd.command install
+./scripts/_internal/sia-backtest-refresh-launchd.command status
+```
+
+준비도 가드:
+
+```bash
+./scripts/_internal/sia-ready-buckets-launchd.command install
+./scripts/_internal/sia-ready-buckets-launchd.command status
+```
+
+## 5. 시장 설정
+
+활성 시장 선택:
+
+```bash
+./scripts/_internal/sia-market-settings.command
+```
+
+시장별 티커 편집:
+
+```bash
+./scripts/_internal/sia-market-tickers.command
+```
+
+기본 정책:
+
+- 뉴스 수집: 연중무휴
+- 가격/신호 수집: 활성 시장 + 장중일 때만
+- 기본 활성 시장: `US`
+- `KR`, `EU`, `JP`는 사용자가 직접 활성화해야 동작
+
+## 6. Windows 참고
+
+Windows 진입점은 현재 내부 스크립트 경로를 사용합니다.
+
+- `scripts/_internal/sia-notifier-launch.ps1`
+
+## 7. PR/Scope Guard 도구
+
+PR 관련 스크립트도 모두 내부 경로를 사용합니다.
+
+```bash
+./scripts/_internal/scope-guard-pr-preflight.sh --pr <PR번호>
+./scripts/_internal/scope-guard-gate.sh --pr <PR번호>
+./scripts/_internal/scope-guard-one-shot.sh
+./scripts/_internal/scope-guard-pr-body-normalizer.sh --pr <PR번호>
+./scripts/_internal/gh-apply-scope-fix-template.sh --pr <PR번호>
+```
+
+## 8. 원칙
+
+- Finder에서 직접 누르는 파일은 `SIA-*`만 사용
+- 자동화/점검/운영 명령은 `scripts/_internal/`만 사용
+- 문서/launchd/래퍼 수정 시 경로 기준은 이 분리 구조를 따라야 함

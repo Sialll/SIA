@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+# SIA notifier environment template
+# Copy this file to ~/.config/sia-notifier/env and set your values.
+
+export TICKERS="AAPL,MSFT"
+export SIGNAL_DB_PATH="/Users/dohyeon/sia-notifier/trading_signal_notifier.sqlite"
+
+export TELEGRAM_BOT_TOKEN="__YOUR_BOT_TOKEN__"
+export TELEGRAM_CHAT_ID="__YOUR_CHAT_ID__"
+export FINNHUB_API_KEY="__YOUR_FINNHUB_API_KEY__"
+export MARKETAUX_API_KEY="__YOUR_MARKETAUX_API_KEY__"
+
+export OLLAMA_HOST="http://localhost:11434"
+export OLLAMA_MODEL="phi3:mini"
+
+export POLL_INTERVAL_MINUTES="15"
+export SIGNAL_COOLDOWN_MINUTES="30"
+export MAX_NEWS_PER_TICKER="3"
+export NEWS_LOOKBACK_HOURS="24"
+export FINNHUB_FAIL_THRESHOLD="3"
+export FINNHUB_FAIL_WINDOW_MINUTES="120"
+export TELEGRAM_PARSE_MODE="HTML"
+export SIGNAL_TREND_WEIGHT="0.55"
+export SIGNAL_RSI_WEIGHT="0.25"
+export SIGNAL_NEWS_WEIGHT="0.20"
+export SIGNAL_THRESHOLD="0.35"
+
+# Optional run mode controls
+# export SIA_DRY_RUN="1"   # set to 1 for dry-run
+# export SIA_POLL_MINUTES="15"  # affects launchd install interval only
