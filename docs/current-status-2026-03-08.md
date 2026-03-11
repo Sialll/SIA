@@ -1,4 +1,4 @@
-# SIA Current Status - 2026-03-08
+# SIA Current Status - 2026-03-11
 
 ## Scope
 
@@ -20,21 +20,23 @@
 
 ### Main dashboard structure
 
-The main dashboard is now split into three tabs:
+The sales-facing dashboard is now split into four tabs:
 
-1. `실시간`
+1. `메인`
    - current intraday visibility
    - current signal cards
-   - recent reflected snapshots
-2. `오프라인 점수`
+   - latest summary and help
+2. `종목`
    - last stored snapshot score for the active watchlist
    - visible even when the market is closed
    - recent ticker change history
    - missing ticker reasons
-3. `관리자 체크`
-   - report links
-   - system status
-   - launchd / cache / source status
+3. `백테스트`
+   - readiness / quality / factor interpretation surface
+   - current sales readiness summary
+4. `설정`
+   - ticker and market configuration
+   - run / refresh actions
 
 ### Main action panel
 
@@ -124,30 +126,29 @@ Hub:
 
 ## Current operational reading
 
-As of 2026-03-08 Asia/Seoul:
+As of 2026-03-11 Asia/Seoul:
 
 - `us-open-check-report.html`
-  - watchlist count: `9`
-  - visible in main: `2`
-  - coverage: `22.2%`
-  - reason for missing tickers: market closed
+  - watchlist count: `28`
+  - visible in main: `28`
+  - coverage: `100.0%`
+  - verdict: `정상`
 - `data-quality-report.html`
-  - verdict: `주의`
-  - strict ready ratio: `50.00%`
-  - mock ratio: `17.65%`
+  - verdict: `양호`
+  - strict ready ratio: `93.64%`
+  - mock ratio: `0.00%`
   - `signal_source` missing: `0`
 - `backtest-readiness-report.html`
-  - verdict: `부분 준비`
-  - only `1 tick` position bucket is ready
-  - longer horizons still need more live non-mock samples
+  - verdict: `준비 완료`
 - `factor-breakdown-report.html`
   - current strongest combination:
-    - `이벤트 / +5 tick / 평균 엣지 0.05% / 상관계수 0.614`
+    - `차트 / +1 tick / 평균 엣지 0.32% / 상관계수 0.177`
 
 Important limitation:
 
-- signal-quality interpretation is still heavily biased toward the symbols with accumulated non-mock intraday data
-- do not over-read the factor report until more live samples accumulate across the expanded watchlist
+- packaging is not fully production-ready yet
+- macOS staging is ready, but signing/notarization is still pending
+- Windows staging is ready, but runtime validation is still pending in a PowerShell-capable environment
 
 ## Automations currently worth keeping
 
@@ -166,11 +167,9 @@ These were deduplicated and older duplicates were removed.
 
 ## Recommended next step for the next operator
 
-1. Wait for the next US open
-2. Check `us-open-check-report.html`
-3. If coverage is not `9/9` while US market is open, fix only the exact missing path
-4. Re-check:
-   - `data-quality-report.html`
-   - `backtest-readiness-report.html`
-   - `factor-breakdown-report.html`
-5. Only after enough non-mock live samples accumulate, interpret signal quality across the whole watchlist
+1. Finish macOS `Developer ID` signing and notarization
+2. Run Windows build/runtime verification in a real PowerShell environment
+3. Keep packaging docs aligned:
+   - `docs/sales-packaging-flow.md`
+   - `docs/macos-signing-notarization-checklist.md`
+   - `docs/windows-packaging-validation-checklist.md`

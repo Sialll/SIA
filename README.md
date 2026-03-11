@@ -18,6 +18,12 @@
 - 주문 실행, 포트폴리오 체결, 투자자문형 추천 엔진은 포함하지 않는다.
 - 즉, 지금 코드는 `최종 제품의 collector + notifier slice`이며, 이후 대시보드/백테스트/리서치 기능이 위에 붙는 구조다.
 
+## Sales Packaging Status
+
+- 미국장 기준 데이터 검증은 현재 `양호/준비 완료` 수준까지 올라왔다.
+- 지금부터는 `판매용 UI 마감`과 `설치/패키징 흐름 정리`가 다음 단계다.
+- 패키징 흐름은 [sales-packaging-flow.md](/Users/dohyeon/Documents/Playground/SIA/docs/sales-packaging-flow.md)에 정리했다.
+
 ## 한 줄 요약
 
 - 주기적으로 주가(종가 기반)와 뉴스 헤드라인을 수집한다.
@@ -457,6 +463,8 @@ GitHub 인증은 아래 1회로 마무리:
 - 엔진 실행: `scripts/SIA-Run.command`
 - 대시보드: `scripts/SIA-Dashboard.command`
 - 리포트 허브: `scripts/SIA-Reports.command`
+- 첫 실행: `scripts/SIA.command`
+  - 설정이 비어 있으면 첫 실행 설정 마법사가 먼저 열립니다.
 - 시장 선택: `scripts/SIA-Market-Settings.command`
 - 시장별 티커 편집: `scripts/SIA-Market-Tickers.command`
 

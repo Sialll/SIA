@@ -7,7 +7,7 @@
 Finder에서 바로 실행할 기본 파일은 아래 1개입니다.
 
 - `scripts/SIA.command`
-  - 단일 실행기. 실전/드라이런/대시보드/리포트/시장 설정/티커 설정을 한 번에 선택
+  - 단일 실행기. 첫 실행이면 설정 마법사를 먼저 열고, 이후에는 바로 메인 화면을 여는 사용자용 기본 진입점
 
 보조 실행기는 아래에 남겨둡니다.
 
@@ -22,6 +22,10 @@ Finder에서 바로 실행할 기본 파일은 아래 1개입니다.
 - `scripts/SIA-Market-Tickers.command`
   - 시장별 티커 편집
 
+첫 실행 마법사를 다시 열고 싶으면:
+
+- `scripts/SIA.command --setup`
+
 ## 2. 내부 운영 스크립트
 
 실제 동작 로직은 모두 `scripts/_internal/` 아래에 있습니다.
@@ -29,6 +33,7 @@ Finder에서 바로 실행할 기본 파일은 아래 1개입니다.
 - 운영 엔진
   - `scripts/_internal/sia-notifier-launch.command`
   - `scripts/_internal/sia-notifier-launchd.command`
+  - `scripts/_internal/sia-first-run.command`
 - 점검/검증
   - `scripts/_internal/sia-notifier-preflight.command`
   - `scripts/_internal/sia-notifier-check-finnhub.command`
@@ -65,6 +70,18 @@ Windows용 백업 래퍼는 `scripts/windows-launchers/` 아래에 있습니다.
 - `scripts/windows-launchers/SIA-Market-Settings.cmd`
 - `scripts/windows-launchers/SIA-Market-Tickers.cmd`
 - `scripts/windows-launchers/*.ps1`
+
+## 2.2 판매용 staging 스크립트
+
+- macOS:
+  - `scripts/_internal/sia-package-macos.command`
+- Windows:
+  - `scripts/windows-launchers/Build-SIA-Windows.ps1`
+
+생성 위치:
+
+- `dist/macos/SIA-macOS/`
+- `dist/windows/SIA-Windows/`
 
 ## 3. macOS 기본 사용 흐름
 

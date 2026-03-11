@@ -54,6 +54,8 @@ class QualityInputs:
     total_macro: int
     total_alerts: int
     sent_alerts: int
+    total_failed_alerts: int
+    recent_failed_alerts: int
     last_snapshot_ts: int | None
     last_price_ts: int | None
     last_macro_ts: int | None
@@ -217,6 +219,26 @@ def load_inputs(db_path: Path) -> QualityInputs:
             if "alerts" in tables
             else 0
         )
+        total_failed_alerts = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE sent = 0 AND COALESCE(error_message, '') <> ''"
+            ).fetchone()[0]
+            if "alerts" in tables
+            else 0
+        )
+        recent_failed_alerts = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM alerts
+                WHERE sent = 0
+                  AND COALESCE(error_message, '') <> ''
+                  AND ts >= CAST(strftime('%s', 'now') AS INTEGER) - 86400
+                """
+            ).fetchone()[0]
+            if "alerts" in tables
+            else 0
+        )
 
     return QualityInputs(
         tables=tables,
@@ -228,6 +250,8 @@ def load_inputs(db_path: Path) -> QualityInputs:
         total_macro=total_macro,
         total_alerts=total_alerts,
         sent_alerts=sent_alerts,
+        total_failed_alerts=total_failed_alerts,
+        recent_failed_alerts=recent_failed_alerts,
         last_snapshot_ts=last_snapshot_ts,
         last_price_ts=last_price_ts,
         last_macro_ts=last_macro_ts,
@@ -281,10 +305,12 @@ def summarize(inputs: QualityInputs) -> QualitySummary:
         findings.append(f"signal_source 미기록 snapshot이 {inputs.missing_signal_source}건 있습니다.")
         recommendations.append("backfill과 최신 notifier 실행으로 source 기록을 유지하세요.")
 
-    if inputs.total_alerts > 0 and inputs.sent_alerts < inputs.total_alerts:
+    if inputs.recent_failed_alerts > 0:
         warned = True
-        findings.append("alerts 테이블 기준 미전송 알림이 일부 있습니다.")
-        recommendations.append("텔레그램 토큰/채팅 ID와 쿨다운 정책을 같이 확인하세요.")
+        findings.append(
+            f"최근 24시간 기준 실패 알림이 {inputs.recent_failed_alerts}건 있습니다."
+        )
+        recommendations.append("텔레그램 토큰/채팅 ID와 최근 error_message를 같이 확인하세요.")
 
     if not findings:
         findings.append("치명적인 데이터 품질 문제는 현재 보이지 않습니다.")
@@ -331,7 +357,7 @@ def render_html(db_path: Path, inputs: QualityInputs, summary: QualitySummary) -
             f"<tr><td>price_ticks</td><td>{inputs.total_price_ticks}</td><td>{fmt_ts(inputs.last_price_ts)}</td><td>non-mock strict 가능 {inputs.strict_ready}/{inputs.strict_non_mock}</td></tr>",
             f"<tr><td>event_factors</td><td>{inputs.total_events}</td><td>-</td><td>뉴스 이벤트 추출 결과</td></tr>",
             f"<tr><td>macro_snapshots</td><td>{inputs.total_macro}</td><td>{fmt_ts(inputs.last_macro_ts)}</td><td>매크로 스냅샷 저장</td></tr>",
-            f"<tr><td>alerts</td><td>{inputs.total_alerts}</td><td>-</td><td>전송 성공 {inputs.sent_alerts}건</td></tr>",
+            f"<tr><td>alerts</td><td>{inputs.total_alerts}</td><td>-</td><td>전송 성공 {inputs.sent_alerts}건 / 최근 24시간 실패 {inputs.recent_failed_alerts}건 / 누적 실패 {inputs.total_failed_alerts}건</td></tr>",
         ]
     )
 

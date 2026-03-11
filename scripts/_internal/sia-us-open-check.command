@@ -7,6 +7,7 @@ ENV_FILE="${HOME}/.config/sia-notifier/env"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/Library/Caches}/sia-notifier"
 REPORT_FILE="${CACHE_DIR}/us-open-check-report.html"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+SCRATCH_DB="${CACHE_DIR}/us-open-check.sqlite"
 
 mkdir -p "$CACHE_DIR"
 
@@ -17,8 +18,10 @@ fi
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
+rm -f "$SCRATCH_DB"
 SIA_NO_OPEN_DASHBOARD=1 \
 SIA_NO_OPEN_LAST_RUN=1 \
+SIGNAL_DB_PATH="$SCRATCH_DB" \
 bash "${PROJECT_ROOT}/scripts/_internal/sia-notifier-launch.command" balanced --dry-run >/dev/null 2>&1 || true
 
 SIA_NO_OPEN_DASHBOARD=1 \

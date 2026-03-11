@@ -168,6 +168,10 @@ if [[ "$SIA_DRY_RUN" != "1" ]]; then
   fi
 else
   SIA_DRY_RUN="1"
+  export TELEGRAM_BOT_TOKEN=""
+  export TELEGRAM_CHAT_ID=""
+  export TELEGRAM_PARSE_MODE="NONE"
+  echo "드라이런 보호: 텔레그램 전송을 강제로 비활성화합니다."
 fi
 
 if is_placeholder "${MARKETAUX_API_KEY:-}"; then

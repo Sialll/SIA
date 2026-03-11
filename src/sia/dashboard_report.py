@@ -165,6 +165,36 @@ def reason_display(value: object) -> str:
     return presentation_reason_display(value)
 
 
+def negative_factor_entries(item: dict[str, object]) -> list[tuple[str, str]]:
+    factor_items = [
+        ("차트", item.get("chart_score")),
+        ("매크로", item.get("macro_score")),
+        ("이벤트", item.get("event_score")),
+        ("뉴스", item.get("news_score")),
+    ]
+    negatives: list[tuple[str, str]] = []
+    for label, raw_value in factor_items:
+        numeric = presentation_score_value(raw_value)
+        if numeric is None or numeric >= 0:
+            continue
+        negatives.append((label, fmt_score(raw_value)))
+    return negatives
+
+
+def negative_factor_summary(item: dict[str, object]) -> str:
+    negatives = negative_factor_entries(item)
+    if not negatives:
+        return ""
+    return "감점 요인: " + " / ".join(f"{label} {score}" for label, score in negatives)
+
+
+def history_context_summary(values: list[float]) -> str:
+    points = [float(value) for value in values if value is not None]
+    if len(points) < 2:
+        return "저장된 차트 이력이 아직 충분하지 않습니다."
+    return f"저장 차트 {len(points)}구간 · {fmt_num(points[0])} → {fmt_num(points[-1])}"
+
+
 def sparkline_svg(values: list[float], width: int = 240, height: int = 64, color: str = "#1f6f78") -> str:
     points = [float(value) for value in values if value is not None]
     if len(points) < 2:
@@ -271,6 +301,48 @@ with sqlite3.connect(str(db_path)) as conn:
             LIMIT 300
             """
         ).fetchall()
+    total_snapshot_count = int(conn.execute("SELECT COUNT(*) FROM dashboard_snapshots").fetchone()[0])
+    if "signal_source" in snapshot_columns:
+        missing_signal_source_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM dashboard_snapshots WHERE COALESCE(signal_source, '') = ''"
+            ).fetchone()[0]
+        )
+        mock_snapshot_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM dashboard_snapshots WHERE COALESCE(signal_source, '') = 'mock'"
+            ).fetchone()[0]
+        )
+        strict_non_mock_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM dashboard_snapshots WHERE COALESCE(signal_source, '') NOT IN ('', 'mock')"
+            ).fetchone()[0]
+        )
+        if price_ticks_exists:
+            strict_ready_snapshot_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM dashboard_snapshots ds
+                    WHERE COALESCE(ds.signal_source, '') NOT IN ('', 'mock')
+                      AND EXISTS (
+                        SELECT 1
+                        FROM price_ticks pt
+                        WHERE pt.ticker = ds.ticker
+                          AND pt.source = ds.signal_source
+                          AND pt.ts > ds.ts
+                        LIMIT 1
+                      )
+                    """
+                ).fetchone()[0]
+            )
+        else:
+            strict_ready_snapshot_count = 0
+    else:
+        missing_signal_source_count = total_snapshot_count
+        mock_snapshot_count = 0
+        strict_non_mock_count = 0
+        strict_ready_snapshot_count = 0
 
 if not rows:
     report_path.write_text(build_empty_html("저장된 스냅샷이 없습니다. notifier를 먼저 실행하세요."), encoding="utf-8")
@@ -450,6 +522,7 @@ initial_source = signal_source_display(initial_card.get("signal_source"))
 initial_strict_label, initial_strict_class, _ = strict_state(
     initial_card.get("signal_source"), initial_card.get("strict_future_ticks")
 )
+initial_negative_summary = negative_factor_summary(initial_card) or "현재 저장 스냅샷 기준 감점 요인이 두드러지지 않습니다."
 buy_count = sum(1 for item in cards if item["signal"] == "BUY")
 sell_count = sum(1 for item in cards if item["signal"] == "SELL")
 hold_count = sum(1 for item in cards if item["signal"] == "HOLD")
@@ -586,6 +659,8 @@ coverage_visible = len(cards)
 coverage_missing = max(coverage_total - coverage_visible, 0)
 coverage_ratio = (coverage_visible / coverage_total * 100.0) if coverage_total else 0.0
 coverage_tone = "ok" if coverage_total and coverage_visible == coverage_total else "warn" if coverage_total else "info"
+mock_snapshot_ratio = (mock_snapshot_count / total_snapshot_count * 100.0) if total_snapshot_count else 0.0
+strict_ready_ratio = (strict_ready_snapshot_count / strict_non_mock_count * 100.0) if strict_non_mock_count else 0.0
 coverage_status_html = "".join(
     [
         f"""
@@ -758,8 +833,11 @@ for market_code, ticker in active_watchlist_entries:
         strict_label, strict_class_name, _strict_eligible = strict_state(
             item.get("signal_source"), item.get("strict_future_ticks")
         )
+        price_history = price_history_by_ticker.get(ticker, [])
         reason_text = reason_display(item.get("reason"))
         reason_preview = reason_text if len(reason_text) <= 120 else reason_text[:117] + "..."
+        negative_summary = negative_factor_summary(item)
+        history_context = history_context_summary(price_history)
         offline_cards_html_parts.append(
             f"""
             <article class="card offline-card">
@@ -779,7 +857,15 @@ for market_code, ticker in active_watchlist_entries:
                 <span class="delta {risk_class(item['risk_level'])}">{esc(risk_display(item["risk_level"]))}</span>
                 <span class="strict-chip {esc(strict_class_name)}">{esc(strict_label)}</span>
               </div>
+              <div class="sparkline-wrap offline-sparkline-wrap">
+                <div class="sparkline-meta">
+                  <span>저장 차트</span>
+                  <span>{esc(history_context)}</span>
+                </div>
+                {sparkline_svg(price_history, width=220, height=54)}
+              </div>
               <p class="offline-reason">{esc(reason_preview)}</p>
+              {f"<p class='negative-note'>{esc(negative_summary)}</p>" if negative_summary else ""}
               <div class="offline-meta">
                 <span>소스 {esc(signal_source)}</span>
                 <span>가격 {esc(fmt_num(item.get("price")))}</span>
@@ -860,6 +946,8 @@ for item in cards:
     top_news = news[0]["title"] if news else "최근 뉴스 없음"
     top_news_url = str(news[0].get("link") or news[0].get("url") or "").strip() if news else ""
     price_history = price_history_by_ticker.get(item["ticker"], [])
+    history_context = history_context_summary(price_history)
+    negative_summary = negative_factor_summary(item)
     score_delta = score_delta_by_ticker.get(item["ticker"], {})
     composite_delta = score_delta.get("composite")
     confidence_delta = score_delta.get("confidence")
@@ -922,6 +1010,8 @@ for item in cards:
             "reason": reason_display(item["reason"] or "-"),
             "headline": top_news,
             "price_history": price_history,
+            "history_context": history_context,
+            "negative_summary": negative_summary,
             "composite_delta": fmt_score_delta(composite_delta),
             "confidence_delta": fmt_score_delta(confidence_delta),
             "news": news[:5],
@@ -980,7 +1070,7 @@ for item in cards:
           <div class="sparkline-wrap">
             <div class="sparkline-meta">
               <span>최근 가격 흐름</span>
-              <span>{fmt_num(price_history[0]) if price_history else '-'} → {fmt_num(price_history[-1]) if price_history else '-'}</span>
+              <span>{esc(history_context)}</span>
             </div>
             {sparkline}
           </div>
@@ -990,6 +1080,7 @@ for item in cards:
             <span>이벤트 {fmt_score(item['event_score'])}</span>
             <span>뉴스 {fmt_score(item['news_score'])}</span>
           </div>
+          {f"<p class='negative-note'>{esc(negative_summary)}</p>" if negative_summary else ""}
           <div class="micro-meta">{source_badge}{strict_badge}</div>
           {"<a class='headline headline-link' href='" + esc(top_news_url) + "' target='_blank' rel='noreferrer'>" + esc(top_news) + "</a>" if top_news_url else "<p class='headline'>" + esc(top_news) + "</p>"}
           <div class="events">{event_badges}</div>
@@ -1053,6 +1144,9 @@ for item in visible_snapshot_items[:30]:
             "strict_future_ticks": int(item.get("strict_future_ticks") or 0),
             "reason": reason_display(item["reason"] or "-"),
             "headline": top_news,
+            "price_history": price_history_by_ticker.get(item["ticker"], []),
+            "history_context": history_context_summary(price_history_by_ticker.get(item["ticker"], [])),
+            "negative_summary": negative_factor_summary(item),
             "composite_delta": fmt_score_delta(score_delta_by_ticker.get(item["ticker"], {}).get("composite")),
             "confidence_delta": fmt_score_delta(score_delta_by_ticker.get(item["ticker"], {}).get("confidence")),
             "news": news[:5],
@@ -1424,6 +1518,116 @@ html_doc = f"""<!doctype html>
       line-height: 1.7;
       white-space: pre-wrap;
     }}
+    .intro {{
+      position: relative;
+    }}
+    .help-button {{
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.82);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 10px 24px rgba(18, 27, 34, 0.08);
+    }}
+    .help-panel {{
+      margin-top: 16px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(21,94,99,0.16);
+      background: linear-gradient(180deg, rgba(248,253,252,0.96), rgba(239,248,247,0.88));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.72);
+    }}
+    .help-panel.is-hidden {{
+      display: none;
+    }}
+    .help-head {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }}
+    .help-head h3 {{
+      margin: 0;
+      font-size: 18px;
+    }}
+    .help-close {{
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .help-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }}
+    .help-card {{
+      padding: 14px 15px;
+      border-radius: 16px;
+      border: 1px solid rgba(21,94,99,0.10);
+      background: rgba(255,255,255,0.76);
+    }}
+    .help-card h4 {{
+      margin: 0 0 8px;
+      font-size: 14px;
+    }}
+    .help-card p,
+    .help-card li {{
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 13px;
+    }}
+    .help-card ul {{
+      margin: 0;
+      padding-left: 18px;
+    }}
+    .product-pillars {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }}
+    .product-pillars .status-item {{
+      margin: 0;
+    }}
+    .sales-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+    }}
+    .sales-card {{
+      padding: 20px;
+    }}
+    .sales-card h2 {{
+      margin: 0 0 10px;
+      font-size: 20px;
+    }}
+    .sales-card p {{
+      margin: 0 0 12px;
+      color: var(--muted);
+      line-height: 1.7;
+    }}
+    .sales-list {{
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.8;
+      font-size: 13px;
+    }}
     .workspace-toolbar {{
       padding: 14px 18px;
       margin-bottom: 18px;
@@ -1505,6 +1709,20 @@ html_doc = f"""<!doctype html>
     .stat .value {{
       margin-top: 6px;
       font-size: 28px;
+      font-weight: 700;
+    }}
+    .offline-sparkline-wrap {{
+      margin-top: 12px;
+    }}
+    .negative-note {{
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(176, 80, 57, 0.18);
+      background: rgba(176, 80, 57, 0.08);
+      color: #7a2d1d;
+      font-size: 12px;
+      line-height: 1.7;
       font-weight: 700;
     }}
     .status-panel {{
@@ -2370,6 +2588,13 @@ html_doc = f"""<!doctype html>
     @media (max-width: 860px) {{
       body {{ padding: 14px; }}
       .hero {{ grid-template-columns: 1fr; }}
+      .help-button {{
+        position: static;
+        margin-bottom: 14px;
+      }}
+      .help-grid {{ grid-template-columns: 1fr; }}
+      .product-pillars {{ grid-template-columns: 1fr; }}
+      .sales-grid {{ grid-template-columns: 1fr; }}
       .content-grid {{ grid-template-columns: 1fr; }}
       .stats {{ grid-template-columns: repeat(2, 1fr); }}
       .controls {{ grid-template-columns: 1fr; }}
@@ -2384,143 +2609,50 @@ html_doc = f"""<!doctype html>
   <main class="shell">
     <section class="hero">
       <article class="panel intro">
+        <button id="helpToggleButton" class="help-button" type="button">도움말</button>
         <h1>SIA<br>메인</h1>
-        <p>관심 종목 추가, 시장 설정, 점수 확인을 한 화면에서 처리하는 사용자용 메인입니다. 장중 상태는 <strong>실시간</strong>, 마지막 저장 점수는 <strong>오프라인 점수</strong>, 운영 진단은 <strong>관리자 체크</strong>에서 봅니다.</p>
+        <p>개인 투자자가 관심 종목 점수, 감점 이유, 백테스트 해석 가능 여부를 한 화면 흐름으로 읽을 수 있게 정리한 메인 화면입니다. 사용자 영역은 <strong>메인 / 종목 / 백테스트 / 설정</strong>으로 나눠 두고, 운영자용 진단 화면은 여기서 숨깁니다.</p>
         <div class="meta">
           <span>최근 갱신: {esc(last_updated)}</span>
           <span>관심 종목 수: {len(active_watchlist_entries)}</span>
           <span>실시간 반영 종목: <strong id="metaTickerCount">{len(cards)}</strong></span>
         </div>
-        <div class="action-workbench">
-          <h2>메인 작업</h2>
-          <p>여기서 관심 종목 추가/삭제, 시장별 티커 일괄 붙여넣기, 엔진 1회 실행, 백테스트 갱신을 바로 시작합니다.</p>
-          <div class="action-row action-inline-row">
-            <div class="quick-mode-toggle">
-              <button id="quickModeAddButton" class="action-toggle active" type="button">추가 모드</button>
-              <button id="quickModeRemoveButton" class="action-toggle" type="button">삭제 모드</button>
-            </div>
-            <input id="quickAddInput" class="action-input" type="text" placeholder="티커 추가 : [ ASTS ]" autocomplete="off">
+        <div id="helpPanel" class="help-panel is-hidden">
+          <div class="help-head">
+            <h3>점수 도움말</h3>
+            <button id="helpCloseButton" class="help-close" type="button">닫기</button>
           </div>
-          <div class="action-row">
-            <button id="quickAddButton" class="action-button primary" type="button">관심 종목 추가</button>
-            <button id="quickRemoveButton" class="action-button" type="button">관심 종목 삭제</button>
+          <div class="help-grid">
+            <article class="help-card">
+              <h4>점수는 어떻게 계산하나요?</h4>
+              <ul>
+                <li>기본 표시는 <strong>0~100점</strong>입니다.</li>
+                <li><strong>차트 / 매크로 / 이벤트 / 뉴스</strong> 네 축을 합쳐 종합 점수를 만듭니다.</li>
+                <li>실시간 탭은 장중 최신 반영 상태, 오프라인 점수는 마지막 저장 스냅샷 기준입니다.</li>
+              </ul>
+            </article>
+            <article class="help-card">
+              <h4>감점은 어디서 보나요?</h4>
+              <ul>
+                <li>카드와 상세 보기에 <strong>감점 요인</strong>이 따로 표시됩니다.</li>
+                <li>차트, 매크로, 이벤트, 뉴스 중 음수로 내려간 축만 모아 보여줍니다.</li>
+                <li>휴장 중에는 저장된 차트 이력과 마지막 저장 점수만 보여줄 수 있습니다.</li>
+              </ul>
+            </article>
           </div>
-          <div class="action-format-guide">
-            <strong>빠른 추가 / 삭제 예시</strong>
-            <div class="action-format-grid">
-              <div class="action-format-card">
-                <div class="format-label">빠른 추가</div>
-                <pre>티커 추가 : [ ASTS ]</pre>
-              </div>
-              <div class="action-format-card">
-                <div class="format-label">빠른 삭제</div>
-                <pre>티커 삭제 : [ ASTS ]</pre>
-              </div>
-            </div>
-          </div>
-          <div class="action-row">
-            <select id="bulkMarketSelect" class="action-input">
-              <option value="US">미국</option>
-              <option value="KR">한국</option>
-              <option value="EU">유럽</option>
-              <option value="JP">일본</option>
-            </select>
-            <textarea id="bulkTickerInput" class="action-input" rows="3" placeholder="AAPL, MSFT, NVDA&#10;또는&#10;AAPL&#10;MSFT&#10;NVDA"></textarea>
-            <button id="bulkSetButton" class="action-button" type="button">시장별 티커 일괄 붙여넣기</button>
-          </div>
-          <div class="action-format-guide">
-            <strong>붙여넣기 예시</strong>
-            <div class="action-format-grid">
-              <div class="action-format-card">
-                <div class="format-label">쉼표로 한 줄 입력</div>
-                <pre>AAPL, MSFT, NVDA, AMZN</pre>
-              </div>
-              <div class="action-format-card">
-                <div class="format-label">줄바꿈으로 여러 줄 입력</div>
-                <pre>AAPL
-MSFT
-NVDA
-AMZN</pre>
-              </div>
-              <div class="action-format-card">
-                <div class="format-label">한국 예시</div>
-                <pre>005930.KS
-000660.KS</pre>
-              </div>
-              <div class="action-format-card">
-                <div class="format-label">유럽 / 일본 예시</div>
-                <pre>ASML
-7203.T</pre>
-              </div>
-            </div>
-            <p>여기에 넣는 값은 선택한 시장의 관심 종목 목록을 그대로 덮어씁니다.</p>
-            <p>입력값 자체는 브라우저에 저장하지 않고, 마지막으로 고른 시장만 기억합니다.</p>
-            <div class="bulk-example-toolbar">
-              <div class="bulk-example-tabs">
-                <button class="bulk-example-tab active" type="button" data-bulk-example-market="US">미국</button>
-                <button class="bulk-example-tab" type="button" data-bulk-example-market="KR">한국</button>
-                <button class="bulk-example-tab" type="button" data-bulk-example-market="EU">유럽</button>
-                <button class="bulk-example-tab" type="button" data-bulk-example-market="JP">일본</button>
-              </div>
-              <button id="bulkExampleCopyButton" class="bulk-copy-button" type="button">현재 예시 복사 + 입력</button>
-            </div>
-            <div class="bulk-example-panel active" data-bulk-example-panel="US">
-              <pre>AAPL, MSFT, NVDA, AMZN
-GOOGL, META, TSLA, ASTS</pre>
-            </div>
-            <div class="bulk-example-panel" data-bulk-example-panel="KR">
-              <pre>005930.KS
-000660.KS
-035420.KS
-051910.KS</pre>
-            </div>
-            <div class="bulk-example-panel" data-bulk-example-panel="EU">
-              <pre>ASML.AS
-SAP.DE
-MC.PA
-NESN.SW</pre>
-            </div>
-            <div class="bulk-example-panel" data-bulk-example-panel="JP">
-              <pre>7203.T
-9984.T
-6758.T
-8035.T</pre>
-            </div>
-          </div>
-          <div id="bulkPreviewBox" class="action-preview">선택한 시장의 현재 관심 종목 목록을 불러오는 중입니다.</div>
-          <div class="action-preview">{last_bulk_set_html}</div>
-          <div class="action-preview">{last_quick_add_html}</div>
-          <div class="action-preview">{last_quick_remove_html}</div>
-          <div class="action-row">
-            <button id="runLiveOnceButton" class="action-button" type="button">엔진 1회 실행</button>
-            <button id="backtestRefreshButton" class="action-button" type="button">백테스트 갱신</button>
-            <button id="refreshMainButton" class="action-button" type="button">메인 다시 만들기</button>
-          </div>
-          <div id="actionStatus" class="action-status">로컬 액션 서비스 연결 후 여기에서 실행 결과를 보여줍니다.</div>
         </div>
-        <div class="quick-links">
-          <a class="quick-link" href="file:///Users/dohyeon/Documents/Playground/SIA/scripts/SIA-Market-Tickers.command">관심 종목 설정</a>
-          <a class="quick-link" href="file:///Users/dohyeon/Documents/Playground/SIA/scripts/SIA-Market-Settings.command">시장 설정</a>
-          <a class="quick-link" href="universe-report.html" target="_blank" rel="noreferrer">관심 종목 목록</a>
-          <a class="quick-link" href="full-universe-report.html" target="_blank" rel="noreferrer">시총 상위 종목 보고서</a>
-          <a class="quick-link" href="backtest-readiness-report.html" target="_blank" rel="noreferrer">백테스트 준비도</a>
-          <a class="quick-link" href="price-backtest-report.html" target="_blank" rel="noreferrer">가격 백테스트</a>
-          <a class="quick-link" href="position-backtest-report.html" target="_blank" rel="noreferrer">포지션 백테스트</a>
-        </div>
-        <div class="gate-strip">
-          <span class="gate-pill">가격 gate {esc(min_price_samples)}</span>
-          <span class="gate-pill">포지션 gate {esc(min_position_trades)}</span>
-          <span class="gate-pill">strict gate {esc(min_strict_aligned)}</span>
-        </div>
-        <div class="market-overview">
-          {market_warning_html}
-          <div class="market-actions">
-            <a class="market-action-link" href="file:///Users/dohyeon/Documents/Playground/SIA/scripts/SIA-Market-Settings.command">시장 체크 변경</a>
-            <a class="market-action-link" href="file:///Users/dohyeon/Documents/Playground/SIA/scripts/SIA-Market-Tickers.command">관심 종목 추가/수정</a>
+        <div class="product-pillars">
+          <div class="status-item status-ok">
+            <div class="label">핵심 용도 <span class="tone-badge tone-ok">제품 기준</span></div>
+            <div class="value">관심 종목 점수 확인 · 감점 이유 확인 · 텔레그램 알림 확인</div>
           </div>
-          <p class="market-action-note">빠른 추가 예시: <code>티커 추가 : [ ASTS ]</code> / <code>티커 추가 : [ ASTS, NVDA, 005930.KS ]</code></p>
-          <div class="market-grid">
-            {''.join(market_cards_html)}
+          <div class="status-item status-info">
+            <div class="label">사용 흐름 <span class="tone-badge tone-info">단순화</span></div>
+            <div class="value">메인에서 점수 확인, 종목에서 상세 확인, 백테스트에서 품질 해석, 설정에서 관심 종목 관리</div>
+          </div>
+          <div class="status-item status-warn">
+            <div class="label">현재 제약 <span class="tone-badge tone-warn">주의</span></div>
+            <div class="value">미국장 휴장 중에는 실시간 반영보다 오프라인 점수와 저장 차트 읽기가 중심입니다.</div>
           </div>
         </div>
       </article>
@@ -2533,13 +2665,14 @@ NESN.SW</pre>
     </section>
     <section class="panel workspace-toolbar">
       <div class="workspace-tabs">
-        <button class="workspace-tab active" type="button" data-main-view="realtime">실시간</button>
-        <button class="workspace-tab" type="button" data-main-view="offline">오프라인 점수</button>
-        <button class="workspace-tab" type="button" data-main-view="admin">관리자 체크</button>
+        <button class="workspace-tab active" type="button" data-main-view="home">메인</button>
+        <button class="workspace-tab" type="button" data-main-view="stocks">종목</button>
+        <button class="workspace-tab" type="button" data-main-view="backtest">백테스트</button>
+        <button class="workspace-tab" type="button" data-main-view="settings">설정</button>
       </div>
-      <p class="workspace-note">실시간은 장중 반영 상태를, 오프라인 점수는 마지막 저장 스냅샷을, 관리자 체크는 데이터 품질과 운영 상태를 보여줍니다.</p>
+      <p class="workspace-note">메인은 오늘 상태, 종목은 마지막 저장 점수와 감점 이유, 백테스트는 신뢰도와 해석 가능 여부, 설정은 관심 종목과 시장 구성을 다룹니다.</p>
     </section>
-    <section class="workspace-panel" data-main-view-panel="realtime">
+    <section class="workspace-panel" data-main-view-panel="home">
     <section class="panel status-panel">
       <h2>장중 반영 현황</h2>
       <p>미국장 등 활성 시장이 열리면 알림 엔진이 15분 주기로 메인을 다시 채웁니다. ASTS 포함 현재 관심 종목이 몇 개 반영됐는지 여기서 바로 확인할 수 있습니다.</p>
@@ -2654,6 +2787,10 @@ NESN.SW</pre>
           </div>
         </div>
         <div class="detail-block">
+          <h3>감점 요인</h3>
+          <p class="detail-reason negative-note" id="detailNegativeSummary">{esc(initial_negative_summary)}</p>
+        </div>
+        <div class="detail-block">
           <h3>근거</h3>
           <p class="detail-reason" id="detailReason">{esc(reason_display(initial_card["reason"]))}</p>
         </div>
@@ -2697,7 +2834,7 @@ NESN.SW</pre>
       </table>
     </section>
     </section>
-    <section class="workspace-panel is-hidden" data-main-view-panel="offline">
+    <section class="workspace-panel is-hidden" data-main-view-panel="stocks">
       <section class="panel status-panel">
         <h2>오프라인 점수</h2>
         <p>장이 닫혀 있어도 마지막으로 저장된 스냅샷 점수를 읽을 수 있습니다. 실시간 탭보다 시간이 뒤쳐질 수 있으므로 최근 저장 시각을 같이 보세요.</p>
@@ -2729,22 +2866,194 @@ NESN.SW</pre>
         </div>
       </section>
     </section>
-    <section class="workspace-panel is-hidden" data-main-view-panel="admin">
-      <section class="panel admin-links-panel">
-        <h2>관리자 체크</h2>
-        <p>운영 진단용 리포트와 데이터 상태 링크입니다. 일반 사용자는 평소에 이 탭까지 볼 필요는 없습니다.</p>
-        <div class="quick-links">
-          <a class="quick-link admin-link" href="report-hub.html" target="_blank" rel="noreferrer">관리자 체크 포인트</a>
-          <a class="quick-link admin-link" href="data-quality-report.html" target="_blank" rel="noreferrer">데이터 품질</a>
-          <a class="quick-link admin-link" href="factor-breakdown-report.html" target="_blank" rel="noreferrer">점수 분해</a>
-          <a class="quick-link admin-link" href="tuning-compare.html" target="_blank" rel="noreferrer">튜닝 비교</a>
+    <section class="workspace-panel is-hidden" data-main-view-panel="backtest">
+      <section class="panel status-panel">
+        <h2>판매 준비 상태</h2>
+        <p>실반영, 실데이터 비중, 백테스트 해석 준비, 기록 일관성을 한 번에 확인하는 요약 영역입니다.</p>
+        <div class="status-grid">
+          <div class="status-item status-{coverage_tone}">
+            <div class="label">실시간 반영 <span class="tone-badge tone-{coverage_tone}">{fmt_num(coverage_ratio, 1)}%</span></div>
+            <div class="value">{coverage_visible}/{coverage_total} 종목이 현재 메인에 반영되어 있습니다.</div>
+          </div>
+          <div class="status-item status-{'ok' if mock_snapshot_ratio == 0 else 'warn'}">
+            <div class="label">실데이터 신뢰성 <span class="tone-badge tone-{'ok' if mock_snapshot_ratio == 0 else 'warn'}">{fmt_num(100.0 - mock_snapshot_ratio, 2)}%</span></div>
+            <div class="value">운영 DB 기준 mock snapshot {mock_snapshot_count}건 / 전체 {total_snapshot_count}건입니다.</div>
+          </div>
+          <div class="status-item status-{'ok' if strict_ready_ratio >= 80.0 else 'warn'}">
+            <div class="label">백테스트 해석 준비 <span class="tone-badge tone-{'ok' if strict_ready_ratio >= 80.0 else 'warn'}">{fmt_num(strict_ready_ratio, 2)}%</span></div>
+            <div class="value">strict 가능 snapshot {strict_ready_snapshot_count}건 / non-mock snapshot {strict_non_mock_count}건입니다.</div>
+          </div>
+          <div class="status-item status-{'ok' if missing_signal_source_count == 0 else 'warn'}">
+            <div class="label">기록 일관성 <span class="tone-badge tone-{'ok' if missing_signal_source_count == 0 else 'warn'}">{missing_signal_source_count}건</span></div>
+            <div class="value">signal_source 미기록 snapshot이 {missing_signal_source_count}건 남아 있습니다.</div>
+          </div>
         </div>
+        <div class="status-inline-note">{'현재 기준 데이터 검증은 통과했고, 남은 작업은 판매용 화면과 설치 흐름 마감입니다.' if coverage_ratio >= 99.0 and mock_snapshot_ratio == 0 and strict_ready_ratio >= 80.0 and missing_signal_source_count == 0 else '아직 실데이터 반영률과 백테스트 해석 준비를 더 확인해야 합니다.'}</div>
+      </section>
+      <section class="sales-grid">
+        <article class="panel sales-card">
+          <h2>백테스트 보는 순서</h2>
+          <p>판매용 제품 기준에서는 수익률보다 먼저 데이터와 표본이 해석 가능한 상태인지 봐야 합니다.</p>
+          <ul class="sales-list">
+            <li>1단계: 백테스트 준비도</li>
+            <li>2단계: 가격/포지션 백테스트</li>
+            <li>3단계: 점수 분해</li>
+          </ul>
+          <div class="gate-strip">
+            <span class="gate-pill">가격 gate {esc(min_price_samples)}</span>
+            <span class="gate-pill">포지션 gate {esc(min_position_trades)}</span>
+            <span class="gate-pill">strict gate {esc(min_strict_aligned)}</span>
+          </div>
+        </article>
+        <article class="panel sales-card">
+          <h2>백테스트 바로가기</h2>
+          <p>사용자에게 바로 보여줄 수 있는 해석용 리포트만 묶었습니다. 관리자용 허브는 메인에서 숨깁니다.</p>
+          <div class="quick-links">
+            <a class="quick-link" href="backtest-readiness-report.html" target="_blank" rel="noreferrer">백테스트 준비도</a>
+            <a class="quick-link" href="price-backtest-report.html" target="_blank" rel="noreferrer">가격 백테스트</a>
+            <a class="quick-link" href="position-backtest-report.html" target="_blank" rel="noreferrer">포지션 백테스트</a>
+            <a class="quick-link" href="factor-breakdown-report.html" target="_blank" rel="noreferrer">점수 분해</a>
+            <a class="quick-link" href="research-report.html" target="_blank" rel="noreferrer">리서치 요약</a>
+          </div>
+        </article>
       </section>
       <section class="panel status-panel">
-        <h2>시스템 상태</h2>
-        <p>운영자가 보는 연결 상태, 캐시 파일, launchd 상태를 읽기 전용으로 보여줍니다.</p>
+        <h2>해석 원칙</h2>
         <div class="status-grid">
-          {system_status_html}
+          <div class="status-item status-info">
+            <div class="label">준비도 우선 <span class="tone-badge tone-info">원칙</span></div>
+            <div class="value">준비도가 낮으면 수익률 숫자를 마케팅 문구처럼 쓰지 않습니다.</div>
+          </div>
+          <div class="status-item status-warn">
+            <div class="label">엄격 기준 유지 <span class="tone-badge tone-warn">strict</span></div>
+            <div class="value">mock 제외 + source 정합성 기준을 유지한 상태에서만 해석합니다.</div>
+          </div>
+          <div class="status-item status-ok">
+            <div class="label">현재 포지션 <span class="tone-badge tone-ok">판매 준비</span></div>
+            <div class="value">지금은 UI보다 장중 표본과 non-mock 누적 품질을 먼저 확인하는 단계입니다.</div>
+          </div>
+        </div>
+      </section>
+    </section>
+    <section class="workspace-panel is-hidden" data-main-view-panel="settings">
+      <section class="panel action-workbench">
+        <h2>설정</h2>
+        <p>여기서 관심 종목 추가/삭제, 시장별 티커 일괄 붙여넣기, 엔진 1회 실행, 백테스트 갱신을 바로 시작합니다.</p>
+        <div class="action-row action-inline-row">
+          <div class="quick-mode-toggle">
+            <button id="quickModeAddButton" class="action-toggle active" type="button">추가 모드</button>
+            <button id="quickModeRemoveButton" class="action-toggle" type="button">삭제 모드</button>
+          </div>
+          <input id="quickAddInput" class="action-input" type="text" placeholder="INTC 또는 INTC, AMD" autocomplete="off">
+        </div>
+        <div class="action-row">
+          <button id="quickAddButton" class="action-button primary" type="button">관심 종목 추가</button>
+          <button id="quickRemoveButton" class="action-button" type="button">관심 종목 삭제</button>
+        </div>
+        <div class="action-format-guide">
+          <strong>빠른 추가 / 삭제 예시</strong>
+          <div class="action-format-grid">
+            <div class="action-format-card">
+              <div class="format-label">빠른 추가</div>
+              <pre>INTC</pre>
+            </div>
+            <div class="action-format-card">
+              <div class="format-label">빠른 삭제</div>
+              <pre>INTC</pre>
+            </div>
+          </div>
+        </div>
+        <div class="action-row">
+          <select id="bulkMarketSelect" class="action-input">
+            <option value="US">미국</option>
+            <option value="KR">한국</option>
+            <option value="EU">유럽</option>
+            <option value="JP">일본</option>
+          </select>
+          <textarea id="bulkTickerInput" class="action-input" rows="3" placeholder="AAPL, MSFT, NVDA&#10;또는&#10;AAPL&#10;MSFT&#10;NVDA"></textarea>
+          <button id="bulkSetButton" class="action-button" type="button">시장별 티커 일괄 붙여넣기</button>
+        </div>
+        <div class="action-format-guide">
+          <strong>붙여넣기 예시</strong>
+          <div class="action-format-grid">
+            <div class="action-format-card">
+              <div class="format-label">쉼표로 한 줄 입력</div>
+              <pre>AAPL, MSFT, NVDA, AMZN</pre>
+            </div>
+            <div class="action-format-card">
+              <div class="format-label">줄바꿈으로 여러 줄 입력</div>
+              <pre>AAPL
+MSFT
+NVDA
+AMZN</pre>
+            </div>
+            <div class="action-format-card">
+              <div class="format-label">한국 예시</div>
+              <pre>005930.KS
+000660.KS</pre>
+            </div>
+            <div class="action-format-card">
+              <div class="format-label">유럽 / 일본 예시</div>
+              <pre>ASML
+7203.T</pre>
+            </div>
+          </div>
+          <p>여기에 넣는 값은 선택한 시장의 관심 종목 목록을 그대로 덮어씁니다.</p>
+          <p>입력값 자체는 브라우저에 저장하지 않고, 마지막으로 고른 시장만 기억합니다.</p>
+          <div class="bulk-example-toolbar">
+            <div class="bulk-example-tabs">
+              <button class="bulk-example-tab active" type="button" data-bulk-example-market="US">미국</button>
+              <button class="bulk-example-tab" type="button" data-bulk-example-market="KR">한국</button>
+              <button class="bulk-example-tab" type="button" data-bulk-example-market="EU">유럽</button>
+              <button class="bulk-example-tab" type="button" data-bulk-example-market="JP">일본</button>
+            </div>
+            <button id="bulkExampleCopyButton" class="bulk-copy-button" type="button">현재 예시 복사 + 입력</button>
+          </div>
+          <div class="bulk-example-panel active" data-bulk-example-panel="US">
+            <pre>AAPL, MSFT, NVDA, AMZN
+GOOGL, META, TSLA, ASTS</pre>
+          </div>
+          <div class="bulk-example-panel" data-bulk-example-panel="KR">
+            <pre>005930.KS
+000660.KS
+035420.KS
+051910.KS</pre>
+          </div>
+          <div class="bulk-example-panel" data-bulk-example-panel="EU">
+            <pre>ASML.AS
+SAP.DE
+MC.PA
+NESN.SW</pre>
+          </div>
+          <div class="bulk-example-panel" data-bulk-example-panel="JP">
+            <pre>7203.T
+9984.T
+6758.T
+8035.T</pre>
+          </div>
+        </div>
+        <div id="bulkPreviewBox" class="action-preview">선택한 시장의 현재 관심 종목 목록을 불러오는 중입니다.</div>
+        <div class="action-preview">{last_bulk_set_html}</div>
+        <div class="action-preview">{last_quick_add_html}</div>
+        <div class="action-preview">{last_quick_remove_html}</div>
+        <div class="action-row">
+          <button id="runLiveOnceButton" class="action-button" type="button">엔진 1회 실행</button>
+          <button id="backtestRefreshButton" class="action-button" type="button">백테스트 갱신</button>
+          <button id="refreshMainButton" class="action-button" type="button">메인 다시 만들기</button>
+        </div>
+        <div id="actionStatus" class="action-status">로컬 액션 서비스 연결 후 여기에서 실행 결과를 보여줍니다.</div>
+      </section>
+      <section class="panel market-overview">
+        {market_warning_html}
+        <div class="market-actions">
+          <a class="market-action-link" href="file:///Users/dohyeon/Documents/Playground/SIA/scripts/SIA-Market-Settings.command">시장 체크 변경</a>
+          <a class="market-action-link" href="file:///Users/dohyeon/Documents/Playground/SIA/scripts/SIA-Market-Tickers.command">관심 종목 추가/수정</a>
+          <a class="market-action-link" href="universe-report.html" target="_blank" rel="noreferrer">관심 종목 목록</a>
+          <a class="market-action-link" href="full-universe-report.html" target="_blank" rel="noreferrer">시총 상위 종목 보고서</a>
+        </div>
+        <p class="market-action-note">빠른 추가 예시: <code>ASTS</code> / <code>ASTS, NVDA, 005930.KS</code> · 빠른 삭제 예시: <code>ASTS</code></p>
+        <div class="market-grid">
+          {''.join(market_cards_html)}
         </div>
       </section>
     </section>
@@ -2778,6 +3087,9 @@ NESN.SW</pre>
       const runLiveOnceButton = document.getElementById('runLiveOnceButton');
       const backtestRefreshButton = document.getElementById('backtestRefreshButton');
       const refreshMainButton = document.getElementById('refreshMainButton');
+      const helpToggleButton = document.getElementById('helpToggleButton');
+      const helpCloseButton = document.getElementById('helpCloseButton');
+      const helpPanel = document.getElementById('helpPanel');
       const actionStatus = document.getElementById('actionStatus');
       const visibleCardCount = document.getElementById('visibleCardCount');
       const visibleRowCount = document.getElementById('visibleRowCount');
@@ -2808,6 +3120,7 @@ NESN.SW</pre>
       const detailMacroScore = document.getElementById('detailMacroScore');
       const detailEventScore = document.getElementById('detailEventScore');
       const detailNewsScore = document.getElementById('detailNewsScore');
+      const detailNegativeSummary = document.getElementById('detailNegativeSummary');
       const detailReason = document.getElementById('detailReason');
       const detailNewsList = document.getElementById('detailNewsList');
       const detailEventList = document.getElementById('detailEventList');
@@ -2829,8 +3142,8 @@ NESN.SW</pre>
       const MARKET_TICKER_PREVIEW = {json.dumps(market_ticker_values, ensure_ascii=False)};
       const MARKET_LABELS = {{ US: '미국', KR: '한국', EU: '유럽', JP: '일본' }};
       const QUICK_INPUT_PLACEHOLDERS = {{
-        add: '티커 추가 : [ ASTS ]',
-        remove: '티커 삭제 : [ ASTS ]',
+        add: 'INTC 또는 INTC, AMD',
+        remove: 'INTC 또는 INTC, AMD',
       }};
 
       let activeSignal = 'ALL';
@@ -2843,28 +3156,28 @@ NESN.SW</pre>
 
       function loadMainViewPreference() {{
         try {{
-          const stored = window.localStorage.getItem(MAIN_VIEW_STORAGE_KEY) || 'realtime';
-          return ['realtime', 'offline', 'admin'].includes(stored) ? stored : 'realtime';
+          const stored = window.localStorage.getItem(MAIN_VIEW_STORAGE_KEY) || 'home';
+          return ['home', 'stocks', 'backtest', 'settings'].includes(stored) ? stored : 'home';
         }} catch (_error) {{
-          return 'realtime';
+          return 'home';
         }}
       }}
 
       function saveMainViewPreference(value) {{
         try {{
-          window.localStorage.setItem(MAIN_VIEW_STORAGE_KEY, String(value || 'realtime'));
+          window.localStorage.setItem(MAIN_VIEW_STORAGE_KEY, String(value || 'home'));
         }} catch (_error) {{
           // ignore storage errors
         }}
       }}
 
       function setMainView(view) {{
-        const activeView = ['realtime', 'offline', 'admin'].includes(view) ? view : 'realtime';
+        const activeView = ['home', 'stocks', 'backtest', 'settings'].includes(view) ? view : 'home';
         workspaceTabs.forEach((tab) => {{
-          tab.classList.toggle('active', (tab.dataset.mainView || 'realtime') === activeView);
+          tab.classList.toggle('active', (tab.dataset.mainView || 'home') === activeView);
         }});
         workspacePanels.forEach((panel) => {{
-          panel.classList.toggle('is-hidden', (panel.dataset.mainViewPanel || 'realtime') !== activeView);
+          panel.classList.toggle('is-hidden', (panel.dataset.mainViewPanel || 'home') !== activeView);
         }});
         saveMainViewPreference(activeView);
       }}
@@ -3081,6 +3394,28 @@ NESN.SW</pre>
         if (quickRemoveButton) quickRemoveButton.textContent = '관심 종목 삭제';
         quickAddButton?.classList.add('primary');
         quickRemoveButton?.classList.remove('primary');
+      }}
+
+      function normalizeQuickInput(rawValue, mode) {{
+        const trimmed = String(rawValue || '').trim();
+        if (!trimmed) return '';
+        if (trimmed.startsWith('티커 추가') || trimmed.startsWith('티커 삭제')) {{
+          return trimmed;
+        }}
+        const bracketMatch = trimmed.match(/\\[(.*)\\]/);
+        const payload = bracketMatch ? bracketMatch[1] : trimmed;
+        const parts = payload
+          .split(/[\\n,]/)
+          .map((item) => item.trim().toUpperCase())
+          .filter(Boolean);
+        if (!parts.length) return '';
+        const prefix = mode === 'remove' ? '티커 삭제' : '티커 추가';
+        return `${{prefix}} : [ ${{parts.join(', ')}} ]`;
+      }}
+
+      function setHelpPanel(open) {{
+        if (!helpPanel) return;
+        helpPanel.classList.toggle('is-hidden', !open);
       }}
 
       function setBulkExampleMarket(market) {{
@@ -3415,6 +3750,7 @@ NESN.SW</pre>
         detailMacroScore.textContent = payload.macro_score || '-';
         detailEventScore.textContent = payload.event_score || '-';
         detailNewsScore.textContent = payload.news_score || '-';
+        detailNegativeSummary.textContent = payload.negative_summary || '현재 저장 스냅샷 기준 감점 요인이 두드러지지 않습니다.';
         detailReason.textContent = payload.reason || '-';
         detailSignal.textContent = signalDisplay(signal);
         detailSignal.className = `badge ${{(signal || 'HOLD').toLowerCase()}}`;
@@ -3558,9 +3894,9 @@ NESN.SW</pre>
 
       quickAddButton?.addEventListener('click', async () => {{
         setQuickInputMode('add');
-        const inputValue = (quickAddInput?.value || '').trim();
+        const inputValue = normalizeQuickInput((quickAddInput?.value || '').trim(), 'add');
         if (!inputValue) {{
-          actionStatus.textContent = '입력값이 비어 있습니다. 예: 티커 추가 : [ ASTS ]';
+          actionStatus.textContent = '입력값이 비어 있습니다. 예: INTC 또는 INTC, AMD';
           return;
         }}
         setActionBusy(true, '관심 종목을 추가하고 메인을 다시 만드는 중입니다...');
@@ -3578,9 +3914,9 @@ NESN.SW</pre>
 
       quickRemoveButton?.addEventListener('click', async () => {{
         setQuickInputMode('remove');
-        const inputValue = (quickAddInput?.value || '').trim();
+        const inputValue = normalizeQuickInput((quickAddInput?.value || '').trim(), 'remove');
         if (!inputValue) {{
-          actionStatus.textContent = '입력값이 비어 있습니다. 예: 티커 삭제 : [ ASTS ]';
+          actionStatus.textContent = '입력값이 비어 있습니다. 예: INTC 또는 INTC, AMD';
           return;
         }}
         setActionBusy(true, '관심 종목을 삭제하고 메인을 다시 만드는 중입니다...');
@@ -3674,6 +4010,17 @@ NESN.SW</pre>
       bulkExampleCopyButton?.addEventListener('click', () => {{
         copyBulkExample();
       }});
+      helpToggleButton?.addEventListener('click', () => {{
+        setHelpPanel(helpPanel?.classList.contains('is-hidden'));
+      }});
+      helpCloseButton?.addEventListener('click', () => {{
+        setHelpPanel(false);
+      }});
+      document.addEventListener('keydown', (event) => {{
+        if (event.key === 'Escape') {{
+          setHelpPanel(false);
+        }}
+      }});
 
       runLiveOnceButton?.addEventListener('click', async () => {{
         setActionBusy(true, '엔진 1회 실행 중입니다...');
@@ -3726,6 +4073,7 @@ NESN.SW</pre>
       }}
       setMainView(loadMainViewPreference());
       setQuickInputMode('add');
+      setHelpPanel(false);
       setBulkExampleMarket((bulkMarketSelect?.value || 'US').trim());
       renderBulkPreview();
       applyFilters();

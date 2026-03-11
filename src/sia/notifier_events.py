@@ -28,6 +28,9 @@ def collect_ticker_news(
     collect_news_items_fn: Callable[..., list[Any]],
 ) -> list[Any]:
     latest_news: list[Any] = []
+    news_fetch_message = ""
+    news_fetch_ok = True
+    news_fetch_level = "INFO"
 
     if dry_run:
         raw_news = mock_news_fn(ticker, max_news_per_ticker)
@@ -47,7 +50,8 @@ def collect_ticker_news(
             "news-fetch",
             ticker,
             source="disabled",
-            ok=False,
+            ok=True,
+            level="INFO",
             message="뉴스 비활성화(max_news_per_ticker=0)",
             sent=0,
         )
@@ -55,6 +59,7 @@ def collect_ticker_news(
 
     if marketaux_api_key:
         source_used = "marketaux"
+        marketaux_error = ""
         try:
             raw_news = fetch_marketaux_news_fn(
                 ticker,
@@ -69,20 +74,30 @@ def collect_ticker_news(
                     limit=max_news_per_ticker,
                     lookback_hours=news_lookback_hours,
                 )
-        except Exception:
+        except Exception as exc:
+            marketaux_error = str(exc)
             source_used = "marketaux-failed->yahoo"
             raw_news = fetch_yahoo_rss_news_fn(
                 ticker,
                 limit=max_news_per_ticker,
                 lookback_hours=news_lookback_hours,
             )
+        if source_used == "marketaux":
+            news_fetch_message = f"marketaux 사용 articles={len(raw_news)}"
+        elif source_used == "marketaux-empty":
+            news_fetch_message = f"marketaux 비어 있음, yahoo rss 사용 articles={len(raw_news)}"
+            news_fetch_level = "WARN"
+        else:
+            news_fetch_message = f"marketaux 실패, yahoo rss 사용 articles={len(raw_news)} error={marketaux_error}"
+            news_fetch_level = "WARN"
         log_source_event(
             conn,
             "news-fetch",
             ticker,
             source=source_used,
-            ok=bool(raw_news),
-            message=f"marketaux_key={'on' if marketaux_api_key else 'off'}",
+            ok=news_fetch_ok,
+            level=news_fetch_level,
+            message=news_fetch_message,
             sent=0,
         )
         return collect_news_items_fn(
@@ -94,15 +109,21 @@ def collect_ticker_news(
         )
 
     source_used = "yahoo-rss"
+    yahoo_error = ""
     try:
         raw_news = fetch_yahoo_rss_news_fn(
             ticker,
             limit=max_news_per_ticker,
             lookback_hours=news_lookback_hours,
         )
-    except Exception:
+        news_fetch_message = f"marketaux key 없음, yahoo rss 사용 articles={len(raw_news)}"
+    except Exception as exc:
+        yahoo_error = str(exc)
         source_used = "yahoo-rss-failed"
         raw_news = []
+        news_fetch_ok = False
+        news_fetch_level = "ERROR"
+        news_fetch_message = f"marketaux key 없음, yahoo rss 실패 error={yahoo_error}"
     latest_news = collect_news_items_fn(
         conn,
         ticker,
@@ -115,8 +136,9 @@ def collect_ticker_news(
         "news-fetch",
         ticker,
         source=source_used,
-        ok=bool(raw_news),
-        message="marketaux key 없음",
+        ok=news_fetch_ok,
+        level=news_fetch_level,
+        message=news_fetch_message,
         sent=0,
     )
     return latest_news

@@ -10,6 +10,7 @@ OVERRIDE_DRY_RUN="__UNSET__"
 RUN_SCRIPT="${REPO_DIR}/scripts/_internal/sia-notifier-launch.command"
 REPORT_FILE="${XDG_CACHE_HOME:-$HOME/Library/Caches}/sia-notifier/quickcheck-report.html"
 API_LOG="${XDG_CACHE_HOME:-$HOME/Library/Caches}/sia-notifier/quickcheck-api.log"
+SCRATCH_DB="${XDG_CACHE_HOME:-$HOME/Library/Caches}/sia-notifier/quickcheck.sqlite"
 
 if [[ "${SIA_DRY_RUN+x}" == "x" ]]; then
   OVERRIDE_DRY_RUN="$SIA_DRY_RUN"
@@ -107,7 +108,8 @@ cd "$REPO_DIR"
 RUN_EXIT=0
 if [[ -f "$RUN_SCRIPT" ]]; then
   if [[ "${SIA_DRY_RUN}" == "1" ]]; then
-    if { "$RUN_SCRIPT" "$RUN_MODE" --dry-run; } 2>&1 | tee -a "$API_LOG"; then
+    rm -f "$SCRATCH_DB"
+    if { SIGNAL_DB_PATH="$SCRATCH_DB" "$RUN_SCRIPT" "$RUN_MODE" --dry-run; } 2>&1 | tee -a "$API_LOG"; then
       RUN_EXIT=0
     else
       RUN_EXIT="${PIPESTATUS[0]:-1}"
