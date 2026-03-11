@@ -1,0 +1,175 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DIST_DIR="$PROJECT_ROOT/dist/macos/SIA-macOS"
+DOCS_DIR="$DIST_DIR/Docs"
+UTILS_DIR="$DIST_DIR/Utilities"
+APP_DIR="$DIST_DIR/SIA.app"
+SUPPORT_DIR="$DIST_DIR/.sia-support"
+INTERNAL_DIR="$SUPPORT_DIR/scripts/_internal"
+SRC_DIR="$SUPPORT_DIR/src"
+ICON_PATH="${SIA_MACOS_ICON_ICNS:-}"
+CODESIGN_IDENTITY="${SIA_MACOS_CODESIGN_IDENTITY:-}"
+NOTARY_PROFILE="${SIA_MACOS_NOTARY_PROFILE:-}"
+ZIP_PATH="$PROJECT_ROOT/dist/macos/SIA-macOS.zip"
+CHECKSUM_PATH="$PROJECT_ROOT/dist/macos/SIA-macOS.zip.sha256"
+
+rm -rf "$DIST_DIR"
+mkdir -p "$DOCS_DIR" "$UTILS_DIR" "$INTERNAL_DIR" "$SRC_DIR"
+
+copy_if_exists() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$src" ]]; then
+    cp -R "$src" "$dst"
+  fi
+}
+
+cp -R "$PROJECT_ROOT/src/." "$SRC_DIR/"
+cp -R "$PROJECT_ROOT/scripts/_internal/." "$INTERNAL_DIR/"
+
+copy_if_exists "$PROJECT_ROOT/docs/sales-readiness-checklist.md" "$DOCS_DIR/"
+copy_if_exists "$PROJECT_ROOT/docs/sales-ui-ia-plan.md" "$DOCS_DIR/"
+copy_if_exists "$PROJECT_ROOT/docs/sales-packaging-flow.md" "$DOCS_DIR/"
+copy_if_exists "$PROJECT_ROOT/docs/default-universe.md" "$DOCS_DIR/"
+
+cat > "$UTILS_DIR/SIA.command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/../.sia-support/scripts/_internal/sia-first-run.command" "$@"
+EOF
+
+cat > "$UTILS_DIR/SIA-Run.command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/../.sia-support/scripts/_internal/sia-notifier-launch.command" balanced --live
+EOF
+
+cat > "$UTILS_DIR/SIA-Dashboard.command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/../.sia-support/scripts/_internal/sia-dashboard.command"
+EOF
+
+cat > "$UTILS_DIR/SIA-Reports.command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/../.sia-support/scripts/_internal/sia-report-hub.command"
+EOF
+
+cat > "$UTILS_DIR/SIA-Market-Settings.command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/../.sia-support/scripts/_internal/sia-market-settings.command"
+EOF
+
+cat > "$UTILS_DIR/SIA-Market-Tickers.command" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/../.sia-support/scripts/_internal/sia-market-tickers.command" "$@"
+EOF
+
+chmod +x "$UTILS_DIR"/*.command
+
+/usr/bin/osacompile -o "$APP_DIR" <<'EOF'
+on run
+  set appPath to POSIX path of (path to me)
+  set launcherPath to quoted form of (appPath & "Contents/Resources/run-sia.sh")
+  do shell script launcherPath & " >/tmp/sia-app-launch.log 2>&1 &"
+end run
+EOF
+
+cat > "$APP_DIR/Contents/Resources/run-sia.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DIST_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+exec "$DIST_DIR/Utilities/SIA.command" "$@"
+EOF
+
+chmod +x "$APP_DIR/Contents/Resources/run-sia.sh"
+
+if [[ -n "$ICON_PATH" && -f "$ICON_PATH" ]]; then
+  cp "$ICON_PATH" "$APP_DIR/Contents/Resources/applet.icns"
+fi
+
+if [[ -n "$CODESIGN_IDENTITY" ]]; then
+  /usr/bin/codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+fi
+
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  if [[ -z "$CODESIGN_IDENTITY" ]]; then
+    echo "notarization requires SIA_MACOS_CODESIGN_IDENTITY" >&2
+    exit 1
+  fi
+  rm -f "$ZIP_PATH"
+  /usr/bin/ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
+  /usr/bin/xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  /usr/bin/xcrun stapler staple "$APP_DIR"
+fi
+
+cat > "$DIST_DIR/README.txt" <<'EOF'
+SIA macOS release staging
+
+권장 실행:
+1. SIA.app 실행
+
+보조 실행기:
+- SIA.app
+- Utilities/SIA.command
+- Utilities/SIA-Run.command
+- Utilities/SIA-Dashboard.command
+- Utilities/SIA-Reports.command
+
+문서:
+- Docs/ 폴더 참고
+
+주의:
+- 이 폴더는 release staging 산출물이다.
+- 현재 macOS staging은 standalone 폴더 기준으로 동작한다.
+- 배포 진입점은 SIA.app 이고, Utilities/는 보조 실행기다.
+- 내부 실행 파일은 숨김 폴더(.sia-support)에 포함되어 있으며 사용자가 직접 열 필요가 없다.
+- 선택 옵션:
+  - SIA_MACOS_ICON_ICNS=/path/to/SIA.icns
+  - SIA_MACOS_CODESIGN_IDENTITY="Developer ID Application: ..."
+  - SIA_MACOS_NOTARY_PROFILE="notary-profile-name"
+EOF
+
+cat > "$DIST_DIR/SECURITY.txt" <<'EOF'
+SIA macOS direct distribution security
+
+이 배포물은 현재 App Store 배포가 아니라 direct distribution 기준입니다.
+
+핵심 원칙:
+1. 앱 내부에는 Telegram 토큰이나 사용자 비밀값을 넣지 않습니다.
+2. 사용자 설정/토큰은 홈 디렉터리 아래에만 저장됩니다.
+   - ~/.config/sia-notifier/env
+3. 내부 실행 파일은 .sia-support 폴더에 숨겨져 있으며, 일반 사용자는 SIA.app만 실행하면 됩니다.
+4. 배포 zip에는 SHA-256 체크섬 파일이 같이 생성됩니다.
+
+권장 검증:
+1. 배포자에게 받은 SIA-macOS.zip.sha256 값을 확인합니다.
+2. 아래 명령으로 로컬 zip의 SHA-256을 검증합니다.
+
+   shasum -a 256 SIA-macOS.zip
+
+3. 값이 같을 때만 압축을 풉니다.
+
+최초 실행 안내:
+- macOS 경고가 뜨면 SIA.app을 우클릭 > 열기 방식으로 1회 허용합니다.
+- 관리자 권한(root)은 필요하지 않습니다.
+EOF
+
+rm -f "$ZIP_PATH" "$CHECKSUM_PATH"
+/usr/bin/ditto -c -k --keepParent "$DIST_DIR" "$ZIP_PATH"
+/usr/bin/shasum -a 256 "$ZIP_PATH" > "$CHECKSUM_PATH"
+
+echo "$DIST_DIR"

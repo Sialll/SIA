@@ -46,6 +46,97 @@ jobs:
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "Changed files: $FILES"
 
+      - name: Require direction-guard (PR body)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          title = os.getenv("PR_TITLE", "")
+          body = os.getenv("PR_BODY", "")
+          content = f"# {title}\n\n{body}\n"
+          Path("/tmp/pr-body.md").write_text(content, encoding="utf-8")
+          PY
+          set +e
+          OUT_FILE="/tmp/sia-pr-guard.log"
+          python -c "from src.sia.cli import main; import sys; sys.exit(main(['parse-issue','--file','/tmp/pr-body.md','--strict']))" > "$OUT_FILE" 2>&1
+          RC=$?
+          set -e
+          cat "$OUT_FILE"
+          if [ "$RC" -ne 0 ]; then
+            echo "::group::Direction guard failure summary"
+            echo "PR 방향성/품질 게이트가 실패했습니다."
+            echo "필수: 텔레그램 알림성, 뉴스/차트 신호성, 자동매매 비포함 조건을 명시하고 재요청하세요."
+            echo "가드 규칙 기준: /Users/dohyeon/Documents/Playground/SIA/SKILL.md"
+            python - <<'PY'
+import json
+from pathlib import Path
+
+out = Path("/tmp/sia-pr-guard.log").read_text(encoding="utf-8", errors="ignore").splitlines()
+report = None
+events = []
+
+for line in out:
+    if line.startswith("STRICT_GUARD_REPORT="):
+        try:
+            report = json.loads(line[len("STRICT_GUARD_REPORT="):])
+        except Exception:
+            report = None
+    elif line.startswith("STRICT_GUARD_EVENTS="):
+        try:
+            events = json.loads(line[len("STRICT_GUARD_EVENTS="):])
+        except Exception:
+            events = []
+
+print("핵심 코드")
+if report and any(v for v in [report.get("blocked", []), report.get("critical", []), report.get("warning", [])]):
+    blocked_codes = report.get("blocked", []) or []
+    critical_codes = report.get("critical", []) or []
+    warning_codes = report.get("warning", []) or []
+    if blocked_codes:
+        print(f"- BLOCKED: {', '.join(sorted(set(blocked_codes)))}")
+    if critical_codes:
+        print(f"- CRITICAL: {', '.join(sorted(set(critical_codes)))}")
+    if warning_codes:
+        print(f"- WARNING: {', '.join(sorted(set(warning_codes)))}")
+else:
+    if events:
+        buckets = {}
+        for ev in events:
+            buckets.setdefault(ev.get("level", "warning"), []).append(ev.get("code"))
+        for level in ("blocked", "high", "warning"):
+            codes = sorted(set([c for c in buckets.get(level, []) if c]))
+            if codes:
+                print(f"- {level.upper()}: {', '.join(codes)}")
+    else:
+        print("- 핵심 항목을 재확인하세요.")
+
+print("권고 상세")
+if events:
+    for ev in events:
+        if ev.get("severity") in {"WARN", "CRITICAL"} or ev.get("level") == "warning":
+            print(f"- [{ev.get('code')}] {ev.get('message')}")
+else:
+    print("- 상세 이벤트를 파싱하지 못했습니다. 로그 전체를 확인하세요.")
+
+summary = {
+    "report": report,
+    "events": events,
+}
+Path("/tmp/guard-summary.json").write_text(
+    json.dumps(summary, ensure_ascii=False),
+    encoding="utf-8",
+)
+print("Summary file: /tmp/guard-summary.json")
+            PY
+            echo "::endgroup::"
+            exit "$RC"
+          fi
+
       - name: Run SIA PR checks
         if: ${{ !contains(github.event.pull_request.labels.*.name, 'exception:multi-file') }}
         shell: bash
