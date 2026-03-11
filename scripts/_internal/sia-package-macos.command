@@ -14,6 +14,7 @@ ICON_PATH="${SIA_MACOS_ICON_ICNS:-}"
 CODESIGN_IDENTITY="${SIA_MACOS_CODESIGN_IDENTITY:-}"
 NOTARY_PROFILE="${SIA_MACOS_NOTARY_PROFILE:-}"
 ZIP_PATH="$PROJECT_ROOT/dist/macos/SIA-macOS.zip"
+CHECKSUM_PATH="$PROJECT_ROOT/dist/macos/SIA-macOS.zip.sha256"
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DOCS_DIR" "$UTILS_DIR" "$INTERNAL_DIR" "$SRC_DIR"
@@ -141,5 +142,34 @@ SIA macOS release staging
   - SIA_MACOS_CODESIGN_IDENTITY="Developer ID Application: ..."
   - SIA_MACOS_NOTARY_PROFILE="notary-profile-name"
 EOF
+
+cat > "$DIST_DIR/SECURITY.txt" <<'EOF'
+SIA macOS direct distribution security
+
+이 배포물은 현재 App Store 배포가 아니라 direct distribution 기준입니다.
+
+핵심 원칙:
+1. 앱 내부에는 Telegram 토큰이나 사용자 비밀값을 넣지 않습니다.
+2. 사용자 설정/토큰은 홈 디렉터리 아래에만 저장됩니다.
+   - ~/.config/sia-notifier/env
+3. 내부 실행 파일은 .sia-support 폴더에 숨겨져 있으며, 일반 사용자는 SIA.app만 실행하면 됩니다.
+4. 배포 zip에는 SHA-256 체크섬 파일이 같이 생성됩니다.
+
+권장 검증:
+1. 배포자에게 받은 SIA-macOS.zip.sha256 값을 확인합니다.
+2. 아래 명령으로 로컬 zip의 SHA-256을 검증합니다.
+
+   shasum -a 256 SIA-macOS.zip
+
+3. 값이 같을 때만 압축을 풉니다.
+
+최초 실행 안내:
+- macOS 경고가 뜨면 SIA.app을 우클릭 > 열기 방식으로 1회 허용합니다.
+- 관리자 권한(root)은 필요하지 않습니다.
+EOF
+
+rm -f "$ZIP_PATH" "$CHECKSUM_PATH"
+/usr/bin/ditto -c -k --keepParent "$DIST_DIR" "$ZIP_PATH"
+/usr/bin/shasum -a 256 "$ZIP_PATH" > "$CHECKSUM_PATH"
 
 echo "$DIST_DIR"

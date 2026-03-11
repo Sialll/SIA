@@ -2869,7 +2869,7 @@ html_doc = f"""<!doctype html>
     <section class="workspace-panel is-hidden" data-main-view-panel="backtest">
       <section class="panel status-panel">
         <h2>판매 준비 상태</h2>
-        <p>실반영, 실데이터 비중, 백테스트 해석 준비, 기록 일관성을 한 번에 확인하는 요약 영역입니다.</p>
+        <p>실반영, 실데이터 비중, 백테스트 해석 준비, 기록 일관성과 현재 배포 준비 상태를 한 번에 보는 요약 영역입니다.</p>
         <div class="status-grid">
           <div class="status-item status-{coverage_tone}">
             <div class="label">실시간 반영 <span class="tone-badge tone-{coverage_tone}">{fmt_num(coverage_ratio, 1)}%</span></div>
@@ -2887,8 +2887,12 @@ html_doc = f"""<!doctype html>
             <div class="label">기록 일관성 <span class="tone-badge tone-{'ok' if missing_signal_source_count == 0 else 'warn'}">{missing_signal_source_count}건</span></div>
             <div class="value">signal_source 미기록 snapshot이 {missing_signal_source_count}건 남아 있습니다.</div>
           </div>
+          <div class="status-item status-info">
+            <div class="label">배포 준비</div>
+            <div class="value">macOS는 직접 배포용 SIA.app + zip + SHA-256까지 준비됐고, 남은 패키징 작업은 Windows 실행 검증입니다.</div>
+          </div>
         </div>
-        <div class="status-inline-note">{'현재 기준 데이터 검증은 통과했고, 남은 작업은 판매용 화면과 설치 흐름 마감입니다.' if coverage_ratio >= 99.0 and mock_snapshot_ratio == 0 and strict_ready_ratio >= 80.0 and missing_signal_source_count == 0 else '아직 실데이터 반영률과 백테스트 해석 준비를 더 확인해야 합니다.'}</div>
+        <div class="status-inline-note">{'현재 기준 데이터 검증은 통과했고, 남은 작업은 판매용 화면 마감과 Windows 패키징 검증입니다.' if coverage_ratio >= 99.0 and mock_snapshot_ratio == 0 and strict_ready_ratio >= 80.0 and missing_signal_source_count == 0 else '아직 실데이터 반영률과 백테스트 해석 준비를 더 확인해야 합니다.'}</div>
       </section>
       <section class="sales-grid">
         <article class="panel sales-card">

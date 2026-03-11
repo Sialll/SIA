@@ -65,6 +65,16 @@
 - 관리자용 리포트는 제품 메인에서 숨기고, 지원/운영 시에만 사용한다.
 - Telegram 알림과 로컬 DB 기반 오프라인 점수 기능은 기본 포함한다.
 - 첫 실행 시에는 설정 마법사가 자동으로 열리게 한다.
+- App Store 배포는 사용하지 않고, direct distribution 기준으로 준비한다.
+- direct distribution에서는 서명보다 먼저 `무결성 검증 가능한 배포물`을 우선한다.
+
+## 4.2 direct distribution 보안 원칙
+
+- 배포 진입점은 `SIA.app` 하나로 제한
+- 내부 실행 파일은 `.sia-support`에 숨김
+- 사용자 비밀값은 앱 폴더가 아니라 사용자 홈 아래 설정 파일에만 저장
+- 배포 zip과 함께 `SHA-256` 체크섬 파일 제공
+- `README.txt`, `SECURITY.txt`에 최초 실행 허용 방법과 검증 방법을 같이 제공
 
 ## 4.1 첫 실행 설정 마법사
 
@@ -101,6 +111,11 @@
 보조 실행기:
 
 - `dist/macos/SIA-macOS/Utilities/`
+
+같이 생성되는 배포 파일:
+
+- `dist/macos/SIA-macOS.zip`
+- `dist/macos/SIA-macOS.zip.sha256`
 
 ### Windows 스테이징
 
@@ -160,7 +175,8 @@ pwsh ./scripts/windows-launchers/Build-SIA-Windows.ps1
   - staging 폴더 생성 가능
   - `SIA.app` 생성 가능
   - hidden support 구조(`.sia-support`) 반영 완료
-  - 실제 `Developer ID` 서명/노타리는 아직 미실행
+  - direct distribution용 `zip + sha256` 생성 가능
+  - 실제 `Developer ID` 서명/노타리는 선택 사항이며 아직 미실행
 - Windows:
   - standalone build script 준비 완료
   - `.sia-support` 구조 반영 완료

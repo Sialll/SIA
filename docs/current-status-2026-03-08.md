@@ -147,7 +147,12 @@ As of 2026-03-11 Asia/Seoul:
 Important limitation:
 
 - packaging is not fully production-ready yet
-- macOS staging is ready, but signing/notarization is still pending
+- macOS direct distribution packaging is ready:
+  - `SIA.app`
+  - `SIA-macOS.zip`
+  - `SIA-macOS.zip.sha256`
+  - `SECURITY.txt`
+- Apple Developer signing/notarization is not required for the current plan
 - Windows staging is ready, but runtime validation is still pending in a PowerShell-capable environment
 
 ## Automations currently worth keeping
@@ -167,7 +172,7 @@ These were deduplicated and older duplicates were removed.
 
 ## Recommended next step for the next operator
 
-1. Finish macOS `Developer ID` signing and notarization
+1. Keep macOS direct distribution package current
 2. Run Windows build/runtime verification in a real PowerShell environment
 3. Keep packaging docs aligned:
    - `docs/sales-packaging-flow.md`
