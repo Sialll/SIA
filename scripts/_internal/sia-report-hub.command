@@ -42,6 +42,7 @@ reports = [
     ("readiness-guard-report.html", "자동 준비도 점검", "준비 구간 임계치 기준 튜닝 비교 갱신 여부"),
     ("price-backtest-report.html", "가격 백테스트", "strict source 기준 horizon 성과"),
     ("position-backtest-report.html", "포지션 백테스트", "중복 포지션 금지 포함 trade 성과"),
+    ("backtest-concentration-report.html", "종목 편향 진단", "상위 종목 집중도와 상위 종목 제외 성과를 점검"),
     ("factor-breakdown-report.html", "점수 분해", "차트 / 매크로 / 이벤트 / 뉴스 / 종합 방향성"),
     ("tuning-compare.html", "튜닝 비교", "저장된 기준선과 현재 readiness / factor 결과 비교"),
     ("us-open-check-report.html", "미국장 시작 점검", "미국장 시작 직후 관심 종목 반영률을 자동 확인한 결과"),

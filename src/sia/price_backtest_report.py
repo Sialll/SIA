@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import math
+import os
 import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
@@ -59,6 +60,7 @@ class BacktestSample:
     exit_price: float
     forward_return: float
     signal_edge: float
+    cost_drag: float
     hit: bool
     max_favorable_move: float
     max_adverse_move: float
@@ -100,11 +102,32 @@ ENTRY_MATCH_FALLBACK_WINDOW_SECONDS = 60 * 60 * 24
 STRICT_EXCLUDED_SOURCES = {"mock"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+DEFAULT_SLIPPAGE_BPS_PER_SIDE = _env_float("SIA_BACKTEST_SLIPPAGE_BPS_PER_SIDE", 3.0)
+DEFAULT_FEE_BPS_PER_SIDE = _env_float("SIA_BACKTEST_FEE_BPS_PER_SIDE", 2.0)
+
+
+def round_trip_cost_rate(slippage_bps_per_side: float, fee_bps_per_side: float) -> float:
+    return max(0.0, (max(slippage_bps_per_side, 0.0) * 2.0 + max(fee_bps_per_side, 0.0) * 2.0) / 10000.0)
+
+
 @dataclass(frozen=True)
 class PriceBacktestInputs:
     signals: list[SignalSnapshot]
     price_series: dict[str, dict[str, list[PricePoint]]]
     horizons: list[BacktestHorizon]
+    slippage_bps_per_side: float
+    fee_bps_per_side: float
+    round_trip_cost_rate: float
 
 
 @dataclass(frozen=True)
@@ -328,6 +351,7 @@ def build_samples(
     signals: list[SignalSnapshot],
     price_series: dict[str, dict[str, list[PricePoint]]],
     horizons: list[BacktestHorizon],
+    round_trip_cost_rate_value: float,
 ) -> tuple[list[BacktestSample], list[dict[str, object]], dict[str, object]]:
     samples: list[BacktestSample] = []
     coverage: list[dict[str, int]] = []
@@ -377,15 +401,15 @@ def build_samples(
             forward_return = (exit_point.close / signal.entry_price) - 1.0
 
             if signal.signal == "BUY":
-                signal_edge = forward_return
-                hit = forward_return > 0
+                gross_signal_edge = forward_return
                 max_favorable_move = max(0.0, (max(point.close for point in path) / signal.entry_price) - 1.0)
                 max_adverse_move = max(0.0, 1.0 - (min(point.close for point in path) / signal.entry_price))
             else:
-                signal_edge = -forward_return
-                hit = forward_return < 0
+                gross_signal_edge = -forward_return
                 max_favorable_move = max(0.0, 1.0 - (min(point.close for point in path) / signal.entry_price))
                 max_adverse_move = max(0.0, (max(point.close for point in path) / signal.entry_price) - 1.0)
+            signal_edge = gross_signal_edge - round_trip_cost_rate_value
+            hit = signal_edge > 0
 
             samples.append(
                 BacktestSample(
@@ -400,6 +424,7 @@ def build_samples(
                     exit_price=exit_point.close,
                     forward_return=forward_return,
                     signal_edge=signal_edge,
+                    cost_drag=round_trip_cost_rate_value,
                     hit=hit,
                     max_favorable_move=max_favorable_move,
                     max_adverse_move=max_adverse_move,
@@ -560,6 +585,9 @@ def render_html(
     coverage: list[dict[str, object]],
     diagnostics: dict[str, object],
     horizons: list[BacktestHorizon],
+    slippage_bps_per_side: float,
+    fee_bps_per_side: float,
+    round_trip_cost_rate_value: float,
 ) -> str:
     if not signals:
         return build_empty_html("BUY/SELL 신호가 없습니다. notifier가 더 실행되어야 합니다.")
@@ -870,6 +898,7 @@ def render_html(
             f"신호 구간: {esc(first_signal_ts)} ~ {esc(last_signal_ts)}",
             f"Horizon: {esc(', '.join(item.label for item in horizons))}",
             f"Aligned sources: {esc(aligned_sources)}",
+            f"비용 가정: 왕복 {fmt_pct(round_trip_cost_rate_value)} (슬리피지 {slippage_bps_per_side * 2:.1f}bp + 수수료 {fee_bps_per_side * 2:.1f}bp)",
         ]),
         render_stats_panel([
             ("Signals", str(len(signals))),
@@ -880,7 +909,7 @@ def render_html(
     )}
 
     <section class="summary-grid">
-      {render_summary_panel("핵심 해석", "<p><span class='accent-buy'>Signal Edge</span>는 BUY면 미래 상승률, SELL이면 미래 하락률을 기준으로 계산합니다. 이 리포트는 `signal entry price`와 같은 source의 entry tick이 허용오차 8% 안에서 맞는 경우만 사용하고, <code>mock</code> source는 strict 백테스트에서 제외합니다. tick 기준과 함께 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같이 봅니다.</p>")}
+      {render_summary_panel("핵심 해석", "<p><span class='accent-buy'>Signal Edge</span>는 BUY면 미래 상승률, SELL이면 미래 하락률을 기준으로 계산하되, 모든 표는 왕복 슬리피지/수수료를 차감한 순엣지 기준입니다. 이 리포트는 `signal entry price`와 같은 source의 entry tick이 허용오차 8% 안에서 맞는 경우만 사용하고, <code>mock</code> source는 strict 백테스트에서 제외합니다. tick 기준과 함께 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같이 봅니다.</p>")}
       {render_summary_panel("현재 가장 나은 조합", f"<p>{esc(presentation_signal_set_display(best_portfolio_row['signal']))} / {esc(best_portfolio_row['horizon_label'])} / 누적수익률 {fmt_pct(best_portfolio_row['cumulative_return'])} / Sharpe {fmt_num(best_portfolio_row['sharpe'])}</p>")}
     </section>
 
@@ -973,23 +1002,36 @@ def render_html(
 
     {render_footnote_section(
         "방법론 메모",
-        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같은 기준으로 같이 봅니다.<br>4. 세션 라벨은 entry 시점 기준으로 `미국 프리장 / 미국 정규장 / 한국 본장` 등으로 계산합니다.<br>5. 누적수익률 / MDD / Sharpe는 `sample trade sequence`를 시간순으로 단순 연결한 값이며, 실제 포트폴리오 체결/중복 포지션 모델은 아닙니다.<br>6. 총 ticker 수는 {unique_tickers}, 총 stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']} 입니다.<br>7. 데이터가 적을 때는 결과보다 표본 수와 coverage부터 보는 편이 맞습니다.<br>8. 현재 가장 나은 단일 신호 기준은 {esc(best_signal_row['signal'])} / {esc(best_signal_row['horizon_label'])} / 평균 시그널 엣지 {fmt_pct(best_signal_row['avg_signal_edge'])} 입니다.",
+        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. 모든 시그널 엣지와 포트폴리오 수익률은 왕복 슬리피지 {slippage_bps_per_side * 2:.1f}bp + 수수료 {fee_bps_per_side * 2:.1f}bp, 총 {fmt_pct(round_trip_cost_rate_value)}를 차감한 순수익 기준입니다.<br>4. tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같은 기준으로 같이 봅니다.<br>5. 세션 라벨은 entry 시점 기준으로 `미국 프리장 / 미국 정규장 / 한국 본장` 등으로 계산합니다.<br>6. 누적수익률 / MDD / Sharpe는 `sample trade sequence`를 시간순으로 단순 연결한 값이며, 실제 포트폴리오 체결/중복 포지션 모델은 아닙니다.<br>7. 총 ticker 수는 {unique_tickers}, 총 stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']} 입니다.<br>8. 데이터가 적을 때는 결과보다 표본 수와 coverage부터 보는 편이 맞습니다.<br>9. 현재 가장 나은 단일 신호 기준은 {esc(best_signal_row['signal'])} / {esc(best_signal_row['horizon_label'])} / 평균 시그널 엣지 {fmt_pct(best_signal_row['avg_signal_edge'])} 입니다.",
     )}
   </main>
 </body>
 </html>"""
 
 
-def load_report_inputs(db_path: Path, horizons: list[BacktestHorizon]) -> PriceBacktestInputs:
+def load_report_inputs(
+    db_path: Path,
+    horizons: list[BacktestHorizon],
+    slippage_bps_per_side: float,
+    fee_bps_per_side: float,
+) -> PriceBacktestInputs:
     return PriceBacktestInputs(
         signals=load_signals(db_path),
         price_series=load_price_series(db_path),
         horizons=horizons,
+        slippage_bps_per_side=slippage_bps_per_side,
+        fee_bps_per_side=fee_bps_per_side,
+        round_trip_cost_rate=round_trip_cost_rate(slippage_bps_per_side, fee_bps_per_side),
     )
 
 
 def summarize_report(inputs: PriceBacktestInputs) -> PriceBacktestSummary:
-    samples, coverage, diagnostics = build_samples(inputs.signals, inputs.price_series, inputs.horizons)
+    samples, coverage, diagnostics = build_samples(
+        inputs.signals,
+        inputs.price_series,
+        inputs.horizons,
+        inputs.round_trip_cost_rate,
+    )
     return PriceBacktestSummary(samples=samples, coverage=coverage, diagnostics=diagnostics)
 
 
@@ -1003,12 +1045,21 @@ def render_report(db_path: Path, inputs: PriceBacktestInputs, summary: PriceBack
             summary.coverage,
             summary.diagnostics,
             inputs.horizons,
+            inputs.slippage_bps_per_side,
+            inputs.fee_bps_per_side,
+            inputs.round_trip_cost_rate,
         )
     )
 
 
-def write_report(db_path: Path, output_path: Path, horizons: list[BacktestHorizon]) -> Path:
-    inputs = load_report_inputs(db_path, horizons)
+def write_report(
+    db_path: Path,
+    output_path: Path,
+    horizons: list[BacktestHorizon],
+    slippage_bps_per_side: float,
+    fee_bps_per_side: float,
+) -> Path:
+    inputs = load_report_inputs(db_path, horizons, slippage_bps_per_side, fee_bps_per_side)
     summary = summarize_report(inputs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render_report(db_path, inputs, summary), encoding="utf-8")
@@ -1020,6 +1071,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", required=True, help="Path to trading_signal_notifier sqlite db")
     parser.add_argument("--output", required=True, help="HTML output path")
     parser.add_argument("--horizons", default=DEFAULT_PRICE_HORIZONS, help="Comma-separated tick/time horizons")
+    parser.add_argument("--slippage-bps-per-side", type=float, default=DEFAULT_SLIPPAGE_BPS_PER_SIDE, help="Per-side slippage assumption in basis points")
+    parser.add_argument("--fee-bps-per-side", type=float, default=DEFAULT_FEE_BPS_PER_SIDE, help="Per-side fee assumption in basis points")
     return parser.parse_args()
 
 
@@ -1030,7 +1083,13 @@ def main() -> int:
     horizons = parse_horizon_specs(args.horizons)
     if not horizons:
         horizons = parse_horizon_specs(DEFAULT_PRICE_HORIZONS)
-    write_report(db_path, output_path, horizons)
+    write_report(
+        db_path,
+        output_path,
+        horizons,
+        float(args.slippage_bps_per_side),
+        float(args.fee_bps_per_side),
+    )
     print(output_path)
     return 0
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import math
+import os
 import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
@@ -60,6 +61,7 @@ class Trade:
     exit_price: float
     strategy_return: float
     raw_return: float
+    cost_drag: float
     hit: bool
     max_favorable_move: float
     max_adverse_move: float
@@ -85,12 +87,33 @@ ENTRY_MATCH_FALLBACK_WINDOW_SECONDS = 60 * 60 * 24
 STRICT_EXCLUDED_SOURCES = {"mock"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+DEFAULT_SLIPPAGE_BPS_PER_SIDE = _env_float("SIA_BACKTEST_SLIPPAGE_BPS_PER_SIDE", 3.0)
+DEFAULT_FEE_BPS_PER_SIDE = _env_float("SIA_BACKTEST_FEE_BPS_PER_SIDE", 2.0)
+
+
+def round_trip_cost_rate(slippage_bps_per_side: float, fee_bps_per_side: float) -> float:
+    return max(0.0, (max(slippage_bps_per_side, 0.0) * 2.0 + max(fee_bps_per_side, 0.0) * 2.0) / 10000.0)
+
+
 @dataclass(frozen=True)
 class PositionBacktestInputs:
     signals: list[SignalSnapshot]
     price_series: dict[str, dict[str, list[PricePoint]]]
     primary_hold: BacktestHorizon
     holds: list[BacktestHorizon]
+    slippage_bps_per_side: float
+    fee_bps_per_side: float
+    round_trip_cost_rate: float
 
 
 @dataclass(frozen=True)
@@ -303,8 +326,13 @@ def align_signal_to_series(
 def simulate_trades(
     signals: list[SignalSnapshot],
     price_series: dict[str, dict[str, list[PricePoint]]],
-    hold: BacktestHorizon,
+    hold: BacktestHorizon | int,
+    round_trip_cost_rate_value: float = 0.0,
 ) -> tuple[list[Trade], dict[str, object]]:
+    if isinstance(hold, int):
+        parsed = parse_horizon_specs(str(max(1, hold)))
+        hold = parsed[0] if parsed else parse_horizon_specs(DEFAULT_POSITION_HORIZONS)[0]
+
     trades: list[Trade] = []
     active_until_by_ticker: dict[str, int] = {}
     diagnostics: dict[str, object] = {
@@ -352,15 +380,15 @@ def simulate_trades(
         raw_return = (exit_point.close / signal.entry_price) - 1.0
 
         if signal.signal == "BUY":
-            strategy_return = raw_return
-            hit = raw_return > 0
+            gross_strategy_return = raw_return
             max_favorable_move = max(0.0, (max(point.close for point in path) / signal.entry_price) - 1.0)
             max_adverse_move = max(0.0, 1.0 - (min(point.close for point in path) / signal.entry_price))
         else:
-            strategy_return = -raw_return
-            hit = raw_return < 0
+            gross_strategy_return = -raw_return
             max_favorable_move = max(0.0, 1.0 - (min(point.close for point in path) / signal.entry_price))
             max_adverse_move = max(0.0, (max(point.close for point in path) / signal.entry_price) - 1.0)
+        strategy_return = gross_strategy_return - round_trip_cost_rate_value
+        hit = strategy_return > 0
 
         active_until_by_ticker[signal.ticker] = exit_point.ts
         trades.append(
@@ -377,6 +405,7 @@ def simulate_trades(
                 exit_price=exit_point.close,
                 strategy_return=strategy_return,
                 raw_return=raw_return,
+                cost_drag=round_trip_cost_rate_value,
                 hit=hit,
                 max_favorable_move=max_favorable_move,
                 max_adverse_move=max_adverse_move,
@@ -502,6 +531,9 @@ def render_html(
     diagnostics: dict[str, object],
     comparison_rows: list[dict[str, object]],
     session_rows: list[dict[str, object]],
+    slippage_bps_per_side: float,
+    fee_bps_per_side: float,
+    round_trip_cost_rate_value: float,
 ) -> str:
     if not signals:
         return build_empty_html("BUY/SELL 신호가 없습니다. notifier가 더 실행되어야 합니다.")
@@ -776,6 +808,7 @@ def render_html(
             f"기본 보유 기준: {esc(primary_hold.label)}",
             f"Trade 구간: {esc(first_trade_ts)} ~ {esc(last_trade_ts)}",
             f"Aligned sources: {esc(aligned_sources)}",
+            f"비용 가정: 왕복 {fmt_pct(round_trip_cost_rate_value)} (슬리피지 {slippage_bps_per_side * 2:.1f}bp + 수수료 {fee_bps_per_side * 2:.1f}bp)",
         ]),
         render_stats_panel([
             ("Signals", str(len(signals))),
@@ -786,7 +819,7 @@ def render_html(
     )}
 
     <section class="summary-grid">
-      {render_summary_panel("핵심 해석", "<p>이 엔진은 `ticker별 중복 포지션 금지` 규칙과 함께, entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞는 경우만 사용합니다. <code>mock</code> source는 strict 포지션 백테스트에서 제외합니다. 기본 tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가` 기준을 같이 비교합니다.</p>")}
+      {render_summary_panel("핵심 해석", "<p>이 엔진은 `ticker별 중복 포지션 금지` 규칙과 함께, entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞는 경우만 사용합니다. <code>mock</code> source는 strict 포지션 백테스트에서 제외하고, 모든 수익률은 왕복 슬리피지/수수료를 차감한 순수익 기준입니다. 기본 tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가` 기준을 같이 비교합니다.</p>")}
       {render_summary_panel("현재 가장 나은 집합", f"<p>{esc(best_row['hold_label'])} / {esc(presentation_signal_set_display(best_row['signal_set']))} / 누적수익률 {fmt_pct(best_row['cumulative_return'])} / Sharpe {fmt_num(best_row['sharpe'])} / MDD {fmt_pct(best_row['max_drawdown'])}</p>")}
     </section>
 
@@ -838,19 +871,28 @@ def render_html(
 
     {render_footnote_section(
         "방법론 메모",
-        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. 같은 ticker에서 포지션이 살아있는 동안 들어오는 다음 신호는 `skipped overlap`으로 제외합니다.<br>4. 다른 ticker 간 동시 보유는 허용하지만, equity curve는 실현 순서대로 단순 연결합니다.<br>5. Sharpe는 연환산이 아닌 sample Sharpe입니다.<br>6. 세션 라벨은 entry 시점 기준으로 계산합니다.<br>7. stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']}, overlap skip 수는 {diagnostics['skipped_overlap']} 입니다.<br>8. 기본 tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가` 비교를 같이 보여줍니다.",
+        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. 모든 전략 수익률은 왕복 슬리피지 {slippage_bps_per_side * 2:.1f}bp + 수수료 {fee_bps_per_side * 2:.1f}bp, 총 {fmt_pct(round_trip_cost_rate_value)}를 차감한 순수익 기준입니다.<br>4. 같은 ticker에서 포지션이 살아있는 동안 들어오는 다음 신호는 `skipped overlap`으로 제외합니다.<br>5. 다른 ticker 간 동시 보유는 허용하지만, equity curve는 실현 순서대로 단순 연결합니다.<br>6. Sharpe는 연환산이 아닌 sample Sharpe입니다.<br>7. 세션 라벨은 entry 시점 기준으로 계산합니다.<br>8. stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']}, overlap skip 수는 {diagnostics['skipped_overlap']} 입니다.<br>9. 기본 tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가` 비교를 같이 보여줍니다.",
     )}
   </main>
 </body>
 </html>"""
 
 
-def load_report_inputs(db_path: Path, primary_hold: BacktestHorizon, holds: list[BacktestHorizon]) -> PositionBacktestInputs:
+def load_report_inputs(
+    db_path: Path,
+    primary_hold: BacktestHorizon,
+    holds: list[BacktestHorizon],
+    slippage_bps_per_side: float,
+    fee_bps_per_side: float,
+) -> PositionBacktestInputs:
     return PositionBacktestInputs(
         signals=load_signals(db_path),
         price_series=load_price_series(db_path),
         primary_hold=primary_hold,
         holds=holds,
+        slippage_bps_per_side=slippage_bps_per_side,
+        fee_bps_per_side=fee_bps_per_side,
+        round_trip_cost_rate=round_trip_cost_rate(slippage_bps_per_side, fee_bps_per_side),
     )
 
 
@@ -860,7 +902,7 @@ def summarize_report(inputs: PositionBacktestInputs) -> PositionBacktestSummary:
     comparison_rows: list[dict[str, object]] = []
     session_rows: list[dict[str, object]] = []
     for hold in inputs.holds:
-        trades, diagnostics = simulate_trades(inputs.signals, inputs.price_series, hold)
+        trades, diagnostics = simulate_trades(inputs.signals, inputs.price_series, hold, inputs.round_trip_cost_rate)
         comparison_rows.extend(summarize_trade_sets(trades, hold))
         session_rows.extend(summarize_sessions(trades, hold))
         if hold.key == inputs.primary_hold.key:
@@ -885,12 +927,22 @@ def render_report(db_path: Path, inputs: PositionBacktestInputs, summary: Positi
             summary.primary_diagnostics,
             summary.comparison_rows,
             summary.session_rows,
+            inputs.slippage_bps_per_side,
+            inputs.fee_bps_per_side,
+            inputs.round_trip_cost_rate,
         )
     )
 
 
-def write_report(db_path: Path, output_path: Path, primary_hold: BacktestHorizon, holds: list[BacktestHorizon]) -> Path:
-    inputs = load_report_inputs(db_path, primary_hold, holds)
+def write_report(
+    db_path: Path,
+    output_path: Path,
+    primary_hold: BacktestHorizon,
+    holds: list[BacktestHorizon],
+    slippage_bps_per_side: float,
+    fee_bps_per_side: float,
+) -> Path:
+    inputs = load_report_inputs(db_path, primary_hold, holds, slippage_bps_per_side, fee_bps_per_side)
     summary = summarize_report(inputs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render_report(db_path, inputs, summary), encoding="utf-8")
@@ -903,6 +955,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="HTML output path")
     parser.add_argument("--hold-ticks", type=int, default=3, help="Fixed holding period measured in future price ticks")
     parser.add_argument("--hold-horizons", default="", help="Comma-separated tick/time holding horizons")
+    parser.add_argument("--slippage-bps-per-side", type=float, default=DEFAULT_SLIPPAGE_BPS_PER_SIDE, help="Per-side slippage assumption in basis points")
+    parser.add_argument("--fee-bps-per-side", type=float, default=DEFAULT_FEE_BPS_PER_SIDE, help="Per-side fee assumption in basis points")
     return parser.parse_args()
 
 
@@ -917,7 +971,14 @@ def main() -> int:
     if not holds:
         holds = parse_horizon_specs(DEFAULT_POSITION_HORIZONS)
     primary_hold = holds[0]
-    write_report(db_path, output_path, primary_hold, holds)
+    write_report(
+        db_path,
+        output_path,
+        primary_hold,
+        holds,
+        float(args.slippage_bps_per_side),
+        float(args.fee_bps_per_side),
+    )
     print(output_path)
     return 0
 
