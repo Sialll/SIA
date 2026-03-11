@@ -10,12 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
+    from .backtest_horizons import DEFAULT_PRICE_HORIZONS, BacktestHorizon, parse_horizon_specs, resolve_exit_index
     from .presentation import signal_set_display as presentation_signal_set_display
     from .report_common import localize_report_html, render_empty_report_html
     from .report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, stddev
     from .report_theme import render_report_theme
     from .report_widgets import render_footnote_section, render_hero_section, render_meta_row, render_stats_panel, render_summary_panel, render_table_section
 except ImportError:
+    from backtest_horizons import DEFAULT_PRICE_HORIZONS, BacktestHorizon, parse_horizon_specs, resolve_exit_index  # type: ignore
     from presentation import signal_set_display as presentation_signal_set_display  # type: ignore
     from report_common import localize_report_html, render_empty_report_html  # type: ignore
     from report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, stddev  # type: ignore
@@ -48,7 +50,8 @@ class BacktestSample:
     signal: str
     entry_ts: int
     exit_ts: int
-    horizon: int
+    horizon_key: str
+    horizon_label: str
     entry_price: float
     exit_price: float
     forward_return: float
@@ -98,7 +101,7 @@ STRICT_EXCLUDED_SOURCES = {"mock"}
 class PriceBacktestInputs:
     signals: list[SignalSnapshot]
     price_series: dict[str, dict[str, list[PricePoint]]]
-    horizons: list[int]
+    horizons: list[BacktestHorizon]
 
 
 @dataclass(frozen=True)
@@ -321,8 +324,8 @@ def align_signal_to_series(
 def build_samples(
     signals: list[SignalSnapshot],
     price_series: dict[str, dict[str, list[PricePoint]]],
-    horizons: list[int],
-) -> tuple[list[BacktestSample], list[dict[str, int]], dict[str, object]]:
+    horizons: list[BacktestHorizon],
+) -> tuple[list[BacktestSample], list[dict[str, object]], dict[str, object]]:
     samples: list[BacktestSample] = []
     coverage: list[dict[str, int]] = []
     diagnostics: dict[str, object] = {
@@ -354,11 +357,16 @@ def build_samples(
             if alignment.source is None or alignment.entry_index is None:
                 continue
             series = price_series.get(signal.ticker, {}).get(alignment.source, [])
-            start_index = alignment.entry_index + 1
-            exit_index = start_index + horizon - 1
-            if start_index >= len(series) or exit_index >= len(series):
+            exit_index = resolve_exit_index(
+                series,
+                alignment.entry_index,
+                alignment.matched_ts or signal.ts,
+                horizon,
+            )
+            if exit_index is None:
                 continue
 
+            start_index = alignment.entry_index + 1
             path = series[start_index : exit_index + 1]
             if not path:
                 continue
@@ -382,7 +390,8 @@ def build_samples(
                     signal=signal.signal,
                     entry_ts=signal.ts,
                     exit_ts=exit_point.ts,
-                    horizon=horizon,
+                    horizon_key=horizon.key,
+                    horizon_label=horizon.label,
                     entry_price=signal.entry_price,
                     exit_price=exit_point.close,
                     forward_return=forward_return,
@@ -398,22 +407,30 @@ def build_samples(
             )
             produced += 1
 
-        coverage.append({"horizon": horizon, "eligible": eligible, "produced": produced})
+        coverage.append(
+            {
+                "horizon_key": horizon.key,
+                "horizon_label": horizon.label,
+                "eligible": eligible,
+                "produced": produced,
+            }
+        )
 
     return samples, coverage, diagnostics
 
 
-def summarize_by_signal(samples: list[BacktestSample], horizons: list[int]) -> list[dict[str, object]]:
+def summarize_by_signal(samples: list[BacktestSample], horizons: list[BacktestHorizon]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for horizon in horizons:
-        horizon_samples = [item for item in samples if item.horizon == horizon]
+        horizon_samples = [item for item in samples if item.horizon_key == horizon.key]
         for signal in ("BUY", "SELL"):
             filtered = [item for item in horizon_samples if item.signal == signal]
             if not filtered:
                 continue
             rows.append(
                 {
-                    "horizon": horizon,
+                    "horizon_key": horizon.key,
+                    "horizon_label": horizon.label,
                     "signal": signal,
                     "samples": len(filtered),
                     "avg_signal_edge": avg([item.signal_edge for item in filtered]),
@@ -425,10 +442,10 @@ def summarize_by_signal(samples: list[BacktestSample], horizons: list[int]) -> l
     return rows
 
 
-def summarize_portfolio_metrics(samples: list[BacktestSample], horizons: list[int]) -> list[dict[str, object]]:
+def summarize_portfolio_metrics(samples: list[BacktestSample], horizons: list[BacktestHorizon]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for horizon in horizons:
-        horizon_samples = [item for item in samples if item.horizon == horizon]
+        horizon_samples = [item for item in samples if item.horizon_key == horizon.key]
         for label, filtered in (
             ("ALL", horizon_samples),
             ("BUY", [item for item in horizon_samples if item.signal == "BUY"]),
@@ -453,7 +470,8 @@ def summarize_portfolio_metrics(samples: list[BacktestSample], horizons: list[in
                 sharpe = (mean_return / sample_std) * math.sqrt(len(returns))
             rows.append(
                 {
-                    "horizon": horizon,
+                    "horizon_key": horizon.key,
+                    "horizon_label": horizon.label,
                     "signal": label,
                     "samples": len(filtered),
                     "avg_trade_return": mean_return,
@@ -465,17 +483,18 @@ def summarize_portfolio_metrics(samples: list[BacktestSample], horizons: list[in
     return rows
 
 
-def summarize_by_bucket(samples: list[BacktestSample], horizons: list[int]) -> list[dict[str, object]]:
+def summarize_by_bucket(samples: list[BacktestSample], horizons: list[BacktestHorizon]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for horizon in horizons:
-        horizon_samples = [item for item in samples if item.horizon == horizon]
+        horizon_samples = [item for item in samples if item.horizon_key == horizon.key]
         for bucket in BUCKET_ORDER:
             filtered = [item for item in horizon_samples if score_bucket(item.composite_score) == bucket]
             if not filtered:
                 continue
             rows.append(
                 {
-                    "horizon": horizon,
+                    "horizon_key": horizon.key,
+                    "horizon_label": horizon.label,
                     "bucket": BUCKET_LABELS[bucket],
                     "samples": len(filtered),
                     "avg_signal_edge": avg([item.signal_edge for item in filtered]),
@@ -486,8 +505,8 @@ def summarize_by_bucket(samples: list[BacktestSample], horizons: list[int]) -> l
     return rows
 
 
-def summarize_leaderboard(samples: list[BacktestSample], horizon: int) -> list[dict[str, object]]:
-    filtered = [item for item in samples if item.horizon == horizon]
+def summarize_leaderboard(samples: list[BacktestSample], horizon_key: str) -> list[dict[str, object]]:
+    filtered = [item for item in samples if item.horizon_key == horizon_key]
     by_ticker: dict[str, list[BacktestSample]] = defaultdict(list)
     for item in filtered:
         by_ticker[item.ticker].append(item)
@@ -512,9 +531,9 @@ def render_html(
     signals: list[SignalSnapshot],
     price_series: dict[str, dict[str, list[PricePoint]]],
     samples: list[BacktestSample],
-    coverage: list[dict[str, int]],
+    coverage: list[dict[str, object]],
     diagnostics: dict[str, object],
-    horizons: list[int],
+    horizons: list[BacktestHorizon],
 ) -> str:
     if not signals:
         return build_empty_html("BUY/SELL 신호가 없습니다. notifier가 더 실행되어야 합니다.")
@@ -532,7 +551,8 @@ def render_html(
     signal_summary = summarize_by_signal(samples, horizons)
     portfolio_summary = summarize_portfolio_metrics(samples, horizons)
     bucket_summary = summarize_by_bucket(samples, horizons)
-    leaderboard = summarize_leaderboard(samples, 3 if 3 in horizons else horizons[0])
+    leaderboard_horizon = next((item for item in horizons if item.kind == "tick" and item.value == 3), horizons[0])
+    leaderboard = summarize_leaderboard(samples, leaderboard_horizon.key)
 
     unique_tickers = len({item.ticker for item in signals})
     total_price_ticks = sum(len(points) for source_map in price_series.values() for points in source_map.values())
@@ -548,7 +568,7 @@ def render_html(
         signal_rows_html.append(
             f"""
             <tr>
-              <td>+{row['horizon']} price tick</td>
+              <td>{esc(row['horizon_label'])}</td>
               <td>{esc(row['signal'])}</td>
               <td>{row['samples']}</td>
               <td>{fmt_pct(row['avg_signal_edge'])}</td>
@@ -564,7 +584,7 @@ def render_html(
         portfolio_rows_html.append(
             f"""
             <tr>
-              <td>+{row['horizon']} price tick</td>
+              <td>{esc(row['horizon_label'])}</td>
               <td>{esc(row['signal'])}</td>
               <td>{row['samples']}</td>
               <td>{fmt_pct(row['avg_trade_return'])}</td>
@@ -581,7 +601,7 @@ def render_html(
         coverage_rows_html.append(
             f"""
             <tr>
-              <td>+{row['horizon']} price tick</td>
+              <td>{esc(row['horizon_label'])}</td>
               <td>{row['eligible']}</td>
               <td>{row['produced']}</td>
               <td>{fmt_pct(coverage_rate)}</td>
@@ -594,7 +614,7 @@ def render_html(
         bucket_rows_html.append(
             f"""
             <tr>
-              <td>+{row['horizon']} price tick</td>
+              <td>{esc(row['horizon_label'])}</td>
               <td>{esc(row['bucket'])}</td>
               <td>{row['samples']}</td>
               <td>{fmt_pct(row['avg_signal_edge'])}</td>
@@ -806,7 +826,7 @@ def render_html(
         render_meta_row([
             f"DB: {esc(db_path)}",
             f"신호 구간: {esc(first_signal_ts)} ~ {esc(last_signal_ts)}",
-            f"Horizon: {esc(', '.join(str(item) for item in horizons))}",
+            f"Horizon: {esc(', '.join(item.label for item in horizons))}",
             f"Aligned sources: {esc(aligned_sources)}",
         ]),
         render_stats_panel([
@@ -818,8 +838,8 @@ def render_html(
     )}
 
     <section class="summary-grid">
-      {render_summary_panel("핵심 해석", "<p><span class='accent-buy'>Signal Edge</span>는 BUY면 미래 상승률, SELL이면 미래 하락률을 기준으로 계산합니다. 이 리포트는 `signal entry price`와 같은 source의 entry tick이 허용오차 8% 안에서 맞는 경우만 사용하고, <code>mock</code> source는 strict 백테스트에서 제외합니다.</p>")}
-      {render_summary_panel("현재 가장 나은 조합", f"<p>{esc(presentation_signal_set_display(best_portfolio_row['signal']))} / +{best_portfolio_row['horizon']} price tick / 누적수익률 {fmt_pct(best_portfolio_row['cumulative_return'])} / Sharpe {fmt_num(best_portfolio_row['sharpe'])}</p>")}
+      {render_summary_panel("핵심 해석", "<p><span class='accent-buy'>Signal Edge</span>는 BUY면 미래 상승률, SELL이면 미래 하락률을 기준으로 계산합니다. 이 리포트는 `signal entry price`와 같은 source의 entry tick이 허용오차 8% 안에서 맞는 경우만 사용하고, <code>mock</code> source는 strict 백테스트에서 제외합니다. tick 기준과 함께 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같이 봅니다.</p>")}
+      {render_summary_panel("현재 가장 나은 조합", f"<p>{esc(presentation_signal_set_display(best_portfolio_row['signal']))} / {esc(best_portfolio_row['horizon_label'])} / 누적수익률 {fmt_pct(best_portfolio_row['cumulative_return'])} / Sharpe {fmt_num(best_portfolio_row['sharpe'])}</p>")}
     </section>
 
     <section class="panel table-panel">
@@ -897,21 +917,21 @@ def render_html(
 
     {render_table_section(
         "티커 리더보드",
-        esc(f"+{3 if 3 in horizons else horizons[0]} price tick 기준"),
+        esc(f"{leaderboard_horizon.label} 기준"),
         ["Ticker", "Samples", "평균 시그널 엣지", "적중률", "평균 Max Adverse"],
         ''.join(leaderboard_rows_html),
     )}
 
     {render_footnote_section(
         "방법론 메모",
-        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. Horizon `+3 price tick`은 진입 tick 이후 같은 티커의 세 번째 가격 기록입니다.<br>4. 누적수익률 / MDD / Sharpe는 `sample trade sequence`를 시간순으로 단순 연결한 값이며, 실제 포트폴리오 체결/중복 포지션 모델은 아닙니다.<br>5. 총 ticker 수는 {unique_tickers}, 총 stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']} 입니다.<br>6. 데이터가 적을 때는 결과보다 표본 수와 coverage부터 보는 편이 맞습니다.<br>7. 현재 가장 나은 단일 신호 기준은 {esc(best_signal_row['signal'])} / +{best_signal_row['horizon']} price tick / 평균 시그널 엣지 {fmt_pct(best_signal_row['avg_signal_edge'])} 입니다.",
+        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같은 기준으로 같이 봅니다.<br>4. 누적수익률 / MDD / Sharpe는 `sample trade sequence`를 시간순으로 단순 연결한 값이며, 실제 포트폴리오 체결/중복 포지션 모델은 아닙니다.<br>5. 총 ticker 수는 {unique_tickers}, 총 stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']} 입니다.<br>6. 데이터가 적을 때는 결과보다 표본 수와 coverage부터 보는 편이 맞습니다.<br>7. 현재 가장 나은 단일 신호 기준은 {esc(best_signal_row['signal'])} / {esc(best_signal_row['horizon_label'])} / 평균 시그널 엣지 {fmt_pct(best_signal_row['avg_signal_edge'])} 입니다.",
     )}
   </main>
 </body>
 </html>"""
 
 
-def load_report_inputs(db_path: Path, horizons: list[int]) -> PriceBacktestInputs:
+def load_report_inputs(db_path: Path, horizons: list[BacktestHorizon]) -> PriceBacktestInputs:
     return PriceBacktestInputs(
         signals=load_signals(db_path),
         price_series=load_price_series(db_path),
@@ -938,7 +958,7 @@ def render_report(db_path: Path, inputs: PriceBacktestInputs, summary: PriceBack
     )
 
 
-def write_report(db_path: Path, output_path: Path, horizons: list[int]) -> Path:
+def write_report(db_path: Path, output_path: Path, horizons: list[BacktestHorizon]) -> Path:
     inputs = load_report_inputs(db_path, horizons)
     summary = summarize_report(inputs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -950,7 +970,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate stricter price-based backtest report from local sqlite data.")
     parser.add_argument("--db-path", required=True, help="Path to trading_signal_notifier sqlite db")
     parser.add_argument("--output", required=True, help="HTML output path")
-    parser.add_argument("--horizons", default="1,3,5,10", help="Comma-separated future price tick horizons")
+    parser.add_argument("--horizons", default=DEFAULT_PRICE_HORIZONS, help="Comma-separated tick/time horizons")
     return parser.parse_args()
 
 
@@ -958,9 +978,9 @@ def main() -> int:
     args = parse_args()
     db_path = Path(args.db_path).expanduser()
     output_path = Path(args.output).expanduser()
-    horizons = [int(item.strip()) for item in args.horizons.split(",") if item.strip()]
+    horizons = parse_horizon_specs(args.horizons)
     if not horizons:
-        horizons = [1, 3, 5, 10]
+        horizons = parse_horizon_specs(DEFAULT_PRICE_HORIZONS)
     write_report(db_path, output_path, horizons)
     print(output_path)
     return 0
