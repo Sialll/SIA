@@ -10,11 +10,13 @@ from pathlib import Path
 import price_backtest_report as price_report
 
 try:
+    from .backtest_sessions import session_label_for_ticker_ts
     from .report_common import localize_report_html, render_empty_report_html
     from .report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, pearson, read_float_env, read_positive_int_env
     from .report_theme import render_report_theme
     from .report_widgets import render_gate_strip, render_hero_section, render_meta_row, render_notes_section, render_stats_panel, render_summary_panel, render_table_section
 except ImportError:
+    from backtest_sessions import session_label_for_ticker_ts  # type: ignore
     from report_common import localize_report_html, render_empty_report_html  # type: ignore
     from report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, pearson, read_float_env, read_positive_int_env  # type: ignore
     from report_theme import render_report_theme  # type: ignore
@@ -80,6 +82,7 @@ class FactorSample:
     ticker: str
     ts: int
     horizon: int
+    session_label: str
     forward_return: float
     chart_score: float
     macro_score: float
@@ -100,6 +103,7 @@ class FactorReportSummary:
     diagnostics: dict[str, object]
     summary_rows: list[dict[str, object]]
     bucket_rows: list[dict[str, object]]
+    session_rows: list[dict[str, object]]
 
 
 def esc(value: object) -> str:
@@ -291,6 +295,7 @@ def align_samples(
                     ticker=snapshot.ticker,
                     ts=snapshot.ts,
                     horizon=horizon,
+                    session_label=session_label_for_ticker_ts(snapshot.ticker, snapshot.ts),
                     forward_return=forward_return,
                     chart_score=snapshot.chart_score,
                     macro_score=snapshot.macro_score,
@@ -372,6 +377,31 @@ def build_factor_summaries(samples: list[FactorSample]) -> tuple[list[dict[str, 
     return summary_rows, bucket_rows
 
 
+def build_session_summaries(samples: list[FactorSample]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for horizon in HORIZONS:
+        horizon_samples = [sample for sample in samples if sample.horizon == horizon]
+        for session_name in sorted({sample.session_label for sample in horizon_samples}):
+            filtered = [sample for sample in horizon_samples if sample.session_label == session_name]
+            if not filtered:
+                continue
+            scores = [sample.composite_score for sample in filtered]
+            returns = [sample.forward_return for sample in filtered]
+            edges = [directional_edge(sample.composite_score, sample.forward_return) for sample in filtered]
+            rows.append(
+                {
+                    "session_label": session_name,
+                    "horizon": horizon,
+                    "samples": len(filtered),
+                    "avg_score": avg(scores),
+                    "avg_return": avg(returns),
+                    "avg_edge": avg(edges),
+                    "hit_rate": (sum(1 for edge in edges if edge > 0) / len(edges)) if edges else None,
+                }
+            )
+    return rows
+
+
 def render_html(
     db_path: Path,
     snapshots: list[FactorSnapshot],
@@ -379,6 +409,7 @@ def render_html(
     diagnostics: dict[str, object],
     summary_rows: list[dict[str, object]],
     bucket_rows: list[dict[str, object]],
+    session_rows: list[dict[str, object]],
 ) -> str:
     first_ts = min((item.ts for item in snapshots), default=None)
     last_ts = max((item.ts for item in snapshots), default=None)
@@ -433,6 +464,20 @@ def render_html(
         </tr>
         """
         for row in bucket_rows
+    )
+    session_html = "".join(
+        f"""
+        <tr>
+          <td>{esc(row['session_label'])}</td>
+          <td>+{row['horizon']} tick</td>
+          <td>{row['samples']}</td>
+          <td>{fmt_score(row['avg_score'])}</td>
+          <td>{fmt_pct(row['avg_return'])}</td>
+          <td>{fmt_pct(row['avg_edge'])}</td>
+          <td>{fmt_pct(row['hit_rate'])}</td>
+        </tr>
+        """
+        for row in session_rows
     )
 
     return f"""<!doctype html>
@@ -646,6 +691,13 @@ def render_html(
         bucket_html,
     )}
 
+    {render_table_section(
+        "세션별 종합 점수 성능",
+        "composite score를 기준으로 프리장 / 정규장 / 본장 차이 확인",
+        ["세션", "Horizon", "Samples", "Avg Score", "Avg Return", "Avg Edge", "Hit Rate"],
+        session_html,
+    )}
+
     {render_notes_section(
         "메모",
         "<li>strict 정렬 기준은 가격/포지션 백테스트와 동일합니다. source가 맞고, <code>mock</code>은 제외됩니다.</li><li>표본이 적으면 corr와 hit rate는 쉽게 흔들립니다. readiness 리포트를 같이 보는 게 맞습니다.</li><li>이 리포트는 factor 품질 진단용입니다. 전략 수익률 리포트와 역할이 다릅니다.</li>",
@@ -665,11 +717,13 @@ def load_report_inputs(db_path: Path) -> FactorReportInputs:
 def summarize_report(inputs: FactorReportInputs) -> FactorReportSummary:
     samples, diagnostics = align_samples(inputs.snapshots, inputs.price_series)
     summary_rows, bucket_rows = build_factor_summaries(samples) if samples else ([], [])
+    session_rows = build_session_summaries(samples) if samples else []
     return FactorReportSummary(
         samples=samples,
         diagnostics=diagnostics,
         summary_rows=summary_rows,
         bucket_rows=bucket_rows,
+        session_rows=session_rows,
     )
 
 
@@ -682,6 +736,7 @@ def render_report(db_path: Path, inputs: FactorReportInputs, summary: FactorRepo
             summary.diagnostics,
             summary.summary_rows,
             summary.bucket_rows,
+            summary.session_rows,
         )
     )
 

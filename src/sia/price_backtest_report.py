@@ -11,6 +11,7 @@ from pathlib import Path
 
 try:
     from .backtest_horizons import DEFAULT_PRICE_HORIZONS, BacktestHorizon, parse_horizon_specs, resolve_exit_index
+    from .backtest_sessions import session_label_for_ticker_ts
     from .presentation import signal_set_display as presentation_signal_set_display
     from .report_common import localize_report_html, render_empty_report_html
     from .report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, stddev
@@ -18,6 +19,7 @@ try:
     from .report_widgets import render_footnote_section, render_hero_section, render_meta_row, render_stats_panel, render_summary_panel, render_table_section
 except ImportError:
     from backtest_horizons import DEFAULT_PRICE_HORIZONS, BacktestHorizon, parse_horizon_specs, resolve_exit_index  # type: ignore
+    from backtest_sessions import session_label_for_ticker_ts  # type: ignore
     from presentation import signal_set_display as presentation_signal_set_display  # type: ignore
     from report_common import localize_report_html, render_empty_report_html  # type: ignore
     from report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, stddev  # type: ignore
@@ -50,6 +52,7 @@ class BacktestSample:
     signal: str
     entry_ts: int
     exit_ts: int
+    session_label: str
     horizon_key: str
     horizon_label: str
     entry_price: float
@@ -390,6 +393,7 @@ def build_samples(
                     signal=signal.signal,
                     entry_ts=signal.ts,
                     exit_ts=exit_point.ts,
+                    session_label=session_label_for_ticker_ts(signal.ticker, alignment.matched_ts or signal.ts),
                     horizon_key=horizon.key,
                     horizon_label=horizon.label,
                     entry_price=signal.entry_price,
@@ -526,6 +530,28 @@ def summarize_leaderboard(samples: list[BacktestSample], horizon_key: str) -> li
     return rows
 
 
+def summarize_by_session(samples: list[BacktestSample], horizons: list[BacktestHorizon]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for horizon in horizons:
+        horizon_samples = [item for item in samples if item.horizon_key == horizon.key]
+        session_names = sorted({item.session_label for item in horizon_samples})
+        for session_name in session_names:
+            filtered = [item for item in horizon_samples if item.session_label == session_name]
+            if not filtered:
+                continue
+            rows.append(
+                {
+                    "horizon_label": horizon.label,
+                    "session_label": session_name,
+                    "samples": len(filtered),
+                    "avg_signal_edge": avg([item.signal_edge for item in filtered]),
+                    "hit_rate": avg([1.0 if item.hit else 0.0 for item in filtered]),
+                    "avg_adverse": avg([item.max_adverse_move for item in filtered]),
+                }
+            )
+    return rows
+
+
 def render_html(
     db_path: Path,
     signals: list[SignalSnapshot],
@@ -551,6 +577,7 @@ def render_html(
     signal_summary = summarize_by_signal(samples, horizons)
     portfolio_summary = summarize_portfolio_metrics(samples, horizons)
     bucket_summary = summarize_by_bucket(samples, horizons)
+    session_summary = summarize_by_session(samples, horizons)
     leaderboard_horizon = next((item for item in horizons if item.kind == "tick" and item.value == 3), horizons[0])
     leaderboard = summarize_leaderboard(samples, leaderboard_horizon.key)
 
@@ -619,6 +646,21 @@ def render_html(
               <td>{row['samples']}</td>
               <td>{fmt_pct(row['avg_signal_edge'])}</td>
               <td>{fmt_score(row['avg_confidence'])}</td>
+              <td>{fmt_pct(row['avg_adverse'])}</td>
+            </tr>
+            """
+        )
+
+    session_rows_html = []
+    for row in session_summary:
+        session_rows_html.append(
+            f"""
+            <tr>
+              <td>{esc(row['horizon_label'])}</td>
+              <td>{esc(row['session_label'])}</td>
+              <td>{row['samples']}</td>
+              <td>{fmt_pct(row['avg_signal_edge'])}</td>
+              <td>{fmt_pct(row['hit_rate'])}</td>
               <td>{fmt_pct(row['avg_adverse'])}</td>
             </tr>
             """
@@ -916,6 +958,13 @@ def render_html(
     )}
 
     {render_table_section(
+        "세션별 가격 기반 성과",
+        "프리장 / 정규장 / 본장별 가격 흐름 차이 확인",
+        ["Horizon", "세션", "Samples", "평균 시그널 엣지", "적중률", "평균 Max Adverse"],
+        ''.join(session_rows_html),
+    )}
+
+    {render_table_section(
         "티커 리더보드",
         esc(f"{leaderboard_horizon.label} 기준"),
         ["Ticker", "Samples", "평균 시그널 엣지", "적중률", "평균 Max Adverse"],
@@ -924,7 +973,7 @@ def render_html(
 
     {render_footnote_section(
         "방법론 메모",
-        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같은 기준으로 같이 봅니다.<br>4. 누적수익률 / MDD / Sharpe는 `sample trade sequence`를 시간순으로 단순 연결한 값이며, 실제 포트폴리오 체결/중복 포지션 모델은 아닙니다.<br>5. 총 ticker 수는 {unique_tickers}, 총 stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']} 입니다.<br>6. 데이터가 적을 때는 결과보다 표본 수와 coverage부터 보는 편이 맞습니다.<br>7. 현재 가장 나은 단일 신호 기준은 {esc(best_signal_row['signal'])} / {esc(best_signal_row['horizon_label'])} / 평균 시그널 엣지 {fmt_pct(best_signal_row['avg_signal_edge'])} 입니다.",
+        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가`를 같은 기준으로 같이 봅니다.<br>4. 세션 라벨은 entry 시점 기준으로 `미국 프리장 / 미국 정규장 / 한국 본장` 등으로 계산합니다.<br>5. 누적수익률 / MDD / Sharpe는 `sample trade sequence`를 시간순으로 단순 연결한 값이며, 실제 포트폴리오 체결/중복 포지션 모델은 아닙니다.<br>6. 총 ticker 수는 {unique_tickers}, 총 stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']} 입니다.<br>7. 데이터가 적을 때는 결과보다 표본 수와 coverage부터 보는 편이 맞습니다.<br>8. 현재 가장 나은 단일 신호 기준은 {esc(best_signal_row['signal'])} / {esc(best_signal_row['horizon_label'])} / 평균 시그널 엣지 {fmt_pct(best_signal_row['avg_signal_edge'])} 입니다.",
     )}
   </main>
 </body>

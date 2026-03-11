@@ -11,6 +11,7 @@ from pathlib import Path
 
 try:
     from .backtest_horizons import DEFAULT_POSITION_HORIZONS, BacktestHorizon, parse_horizon_specs, resolve_exit_index
+    from .backtest_sessions import session_label_for_ticker_ts
     from .presentation import signal_set_display as presentation_signal_set_display
     from .report_common import localize_report_html, render_empty_report_html
     from .report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, stddev
@@ -18,6 +19,7 @@ try:
     from .report_widgets import render_footnote_section, render_hero_section, render_meta_row, render_stats_panel, render_summary_panel, render_table_section
 except ImportError:
     from backtest_horizons import DEFAULT_POSITION_HORIZONS, BacktestHorizon, parse_horizon_specs, resolve_exit_index  # type: ignore
+    from backtest_sessions import session_label_for_ticker_ts  # type: ignore
     from presentation import signal_set_display as presentation_signal_set_display  # type: ignore
     from report_common import localize_report_html, render_empty_report_html  # type: ignore
     from report_metrics import avg, fmt_num, fmt_pct, fmt_score, fmt_ts, stddev  # type: ignore
@@ -50,6 +52,7 @@ class Trade:
     signal: str
     entry_ts: int
     exit_ts: int
+    session_label: str
     hold_key: str
     hold_label: str
     hold_ticks: int
@@ -95,6 +98,7 @@ class PositionBacktestSummary:
     primary_trades: list[Trade]
     primary_diagnostics: dict[str, object]
     comparison_rows: list[dict[str, object]]
+    session_rows: list[dict[str, object]]
 
 
 def esc(value: object) -> str:
@@ -365,6 +369,7 @@ def simulate_trades(
                 signal=signal.signal,
                 entry_ts=signal.ts,
                 exit_ts=exit_point.ts,
+                session_label=session_label_for_ticker_ts(signal.ticker, alignment.matched_ts or signal.ts),
                 hold_key=hold.key,
                 hold_label=hold.label,
                 hold_ticks=len(path),
@@ -467,6 +472,27 @@ def summarize_tickers(trades: list[Trade]) -> list[dict[str, object]]:
     return rows
 
 
+def summarize_sessions(trades: list[Trade], hold: BacktestHorizon) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    session_names = sorted({item.session_label for item in trades})
+    for session_name in session_names:
+        filtered = [item for item in trades if item.session_label == session_name]
+        if not filtered:
+            continue
+        metrics = compute_path_metrics(filtered)
+        rows.append(
+            {
+                "hold_label": hold.label,
+                "session_label": session_name,
+                "trades": len(filtered),
+                "avg_trade_return": metrics["avg_trade_return"],
+                "cumulative_return": metrics["cumulative_return"],
+                "win_rate": metrics["win_rate"],
+            }
+        )
+    return rows
+
+
 def render_html(
     db_path: Path,
     primary_hold: BacktestHorizon,
@@ -475,6 +501,7 @@ def render_html(
     trades: list[Trade],
     diagnostics: dict[str, object],
     comparison_rows: list[dict[str, object]],
+    session_rows: list[dict[str, object]],
 ) -> str:
     if not signals:
         return build_empty_html("BUY/SELL 신호가 없습니다. notifier가 더 실행되어야 합니다.")
@@ -548,6 +575,7 @@ def render_html(
             <tr>
               <td>{fmt_ts(trade.entry_ts)}</td>
               <td>{fmt_ts(trade.exit_ts)}</td>
+              <td>{esc(trade.session_label)}</td>
               <td>{esc(trade.hold_label)}</td>
               <td>{esc(trade.ticker)}</td>
               <td>{esc(trade.signal)}</td>
@@ -555,6 +583,21 @@ def render_html(
               <td>{fmt_pct(trade.max_favorable_move)}</td>
               <td>{fmt_pct(trade.max_adverse_move)}</td>
               <td>{fmt_score(trade.confidence)}</td>
+            </tr>
+            """
+        )
+
+    session_rows_html = []
+    for row in session_rows:
+        session_rows_html.append(
+            f"""
+            <tr>
+              <td>{esc(row['hold_label'])}</td>
+              <td>{esc(row['session_label'])}</td>
+              <td>{row['trades']}</td>
+              <td>{fmt_pct(row['avg_trade_return'])}</td>
+              <td>{fmt_pct(row['cumulative_return'])}</td>
+              <td>{fmt_pct(row['win_rate'])}</td>
             </tr>
             """
         )
@@ -773,6 +816,13 @@ def render_html(
     </section>
 
     {render_table_section(
+        "세션별 포지션 성과",
+        "프리장 / 정규장 / 본장별 trade 품질 차이",
+        ["보유 기준", "세션", "Trades", "평균 Trade Return", "누적수익률", "적중률"],
+        ''.join(session_rows_html),
+    )}
+
+    {render_table_section(
         "티커별 성과",
         f"중복 포지션 금지 규칙 반영 후 {primary_hold.label} 기준 ticker별 누적 성과",
         ["Ticker", "Trades", "평균 Trade Return", "누적수익률", "적중률", "MDD"],
@@ -782,13 +832,13 @@ def render_html(
     {render_table_section(
         "최근 Trade 20건",
         f"entry/exit 기준으로 실제 시뮬레이션된 포지션 ({primary_hold.label} 기준)",
-        ["Entry", "Exit", "보유 기준", "Ticker", "Signal", "Strategy Return", "Max Favorable", "Max Adverse", "Confidence"],
+        ["Entry", "Exit", "세션", "보유 기준", "Ticker", "Signal", "Strategy Return", "Max Favorable", "Max Adverse", "Confidence"],
         ''.join(trade_rows_html),
     )}
 
     {render_footnote_section(
         "방법론 메모",
-        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. 같은 ticker에서 포지션이 살아있는 동안 들어오는 다음 신호는 `skipped overlap`으로 제외합니다.<br>4. 다른 ticker 간 동시 보유는 허용하지만, equity curve는 실현 순서대로 단순 연결합니다.<br>5. Sharpe는 연환산이 아닌 sample Sharpe입니다.<br>6. stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']}, overlap skip 수는 {diagnostics['skipped_overlap']} 입니다.<br>7. 기본 tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가` 비교를 같이 보여줍니다.",
+        f"1. 이 리포트는 외부 API 재조회 없이 현재 DB만 사용합니다.<br>2. strict 기준: entry price와 같은 source의 price tick이 허용오차 8% 안에서 맞아야 하며, <code>mock</code> source는 제외합니다.<br>3. 같은 ticker에서 포지션이 살아있는 동안 들어오는 다음 신호는 `skipped overlap`으로 제외합니다.<br>4. 다른 ticker 간 동시 보유는 허용하지만, equity curve는 실현 순서대로 단순 연결합니다.<br>5. Sharpe는 연환산이 아닌 sample Sharpe입니다.<br>6. 세션 라벨은 entry 시점 기준으로 계산합니다.<br>7. stored price tick 수는 {total_price_ticks}, source mismatch 필터 수는 {diagnostics['filtered_source_mismatch']}, overlap skip 수는 {diagnostics['skipped_overlap']} 입니다.<br>8. 기본 tick 기준 외에 `30분`, `1시간`, `당일 종가`, `익일 시가` 비교를 같이 보여줍니다.",
     )}
   </main>
 </body>
@@ -808,9 +858,11 @@ def summarize_report(inputs: PositionBacktestInputs) -> PositionBacktestSummary:
     primary_trades: list[Trade] = []
     primary_diagnostics: dict[str, object] = {}
     comparison_rows: list[dict[str, object]] = []
+    session_rows: list[dict[str, object]] = []
     for hold in inputs.holds:
         trades, diagnostics = simulate_trades(inputs.signals, inputs.price_series, hold)
         comparison_rows.extend(summarize_trade_sets(trades, hold))
+        session_rows.extend(summarize_sessions(trades, hold))
         if hold.key == inputs.primary_hold.key:
             primary_trades = trades
             primary_diagnostics = diagnostics
@@ -818,6 +870,7 @@ def summarize_report(inputs: PositionBacktestInputs) -> PositionBacktestSummary:
         primary_trades=primary_trades,
         primary_diagnostics=primary_diagnostics,
         comparison_rows=comparison_rows,
+        session_rows=session_rows,
     )
 
 
@@ -831,6 +884,7 @@ def render_report(db_path: Path, inputs: PositionBacktestInputs, summary: Positi
             summary.primary_trades,
             summary.primary_diagnostics,
             summary.comparison_rows,
+            summary.session_rows,
         )
     )
 

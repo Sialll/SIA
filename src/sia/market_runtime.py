@@ -35,6 +35,7 @@ DEFAULT_SESSION_WINDOWS = {
 DEFAULT_MARKET_SELECTION_PATH = "~/.config/sia-notifier/market-selection.json"
 DEFAULT_ENABLED_MARKETS = ("US",)
 KST = ZoneInfo("Asia/Seoul")
+EU_TICKER_SUFFIXES = (".AS", ".BR", ".DE", ".L", ".MC", ".MI", ".PA", ".SW")
 
 
 def selection_file_path() -> str:
@@ -47,6 +48,17 @@ def selection_file_path() -> str:
 
 def market_label(code: str) -> str:
     return MARKET_LABELS.get(code, code)
+
+
+def ticker_market_code(ticker: str) -> str:
+    normalized = str(ticker or "").strip().upper()
+    if normalized.endswith((".KS", ".KQ")):
+        return "KR"
+    if normalized.endswith(".T"):
+        return "JP"
+    if normalized.endswith(EU_TICKER_SUFFIXES):
+        return "EU"
+    return "US"
 
 
 def market_selection_summary(codes: tuple[str, ...]) -> str:
